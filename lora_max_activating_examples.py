@@ -8,9 +8,10 @@ from datasets import load_dataset
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 import json
+import heapq
 
 # %%
 # Configuration
@@ -99,17 +100,55 @@ class ActivationExample:
     context_after: List[str]
     layer: int
     proj_type: str
+    context_activations: Dict[int, float] = None  # Maps token_idx to activation for context tokens
 
-# Storage for all activations
-all_activations = {
-    'gate_proj': {layer: [] for layer in range(n_layers)},
-    'up_proj': {layer: [] for layer in range(n_layers)},
-    'down_proj': {layer: [] for layer in range(n_layers)}
+# Storage for top activations only - using min heaps for efficiency
+class TopKTracker:
+    def __init__(self, k):
+        self.k = k
+        self.top_positive = []  # min heap of positive activations
+        self.top_negative = []  # max heap (negated) of negative activations
+        self.counter = 0  # Tie-breaker to avoid comparing ActivationExample objects
+        
+    def add(self, example: ActivationExample):
+        act = example.activation
+        self.counter += 1
+        
+        if act >= 0:
+            if len(self.top_positive) < self.k:
+                heapq.heappush(self.top_positive, (act, self.counter, example))
+            elif act > self.top_positive[0][0]:
+                heapq.heapreplace(self.top_positive, (act, self.counter, example))
+        else:
+            # Use negative to create max heap for negative values
+            if len(self.top_negative) < self.k:
+                heapq.heappush(self.top_negative, (-act, self.counter, example))
+            elif -act > self.top_negative[0][0]:
+                heapq.heapreplace(self.top_negative, (-act, self.counter, example))
+    
+    def get_top_positive(self):
+        # Return sorted from highest to lowest
+        return [ex for _, _, ex in sorted(self.top_positive, key=lambda x: x[0], reverse=True)]
+    
+    def get_top_negative(self):
+        # Return sorted from lowest to highest
+        return [ex for _, _, ex in sorted(self.top_negative, key=lambda x: -x[0])]
+
+# Initialize trackers for each projection type and layer
+top_k_trackers = {
+    proj_type: {layer: TopKTracker(top_k) for layer in range(n_layers)}
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']
+}
+
+# Also keep track of all activations for statistics and visualization
+all_activations_stats = {
+    proj_type: {layer: [] for layer in range(n_layers)}
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']
 }
 
 # %%
 # Process rollouts
-num_examples = min(100, len(dataset))
+num_examples = min(16, len(dataset))
 print(f"Processing {num_examples} rollouts...")
 
 # Process rollouts - using DeepSeek traces and attempts
@@ -127,8 +166,6 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
         continue
     
     # Use the exact format for thinking traces
-    # <|im_start|>system\n(system prompt)\n<|im_start|>user\n(question)\n<|im_start|>assistant\n<|im_start|>think\n(thinking trace)<|im_start|>answer\n(answer)<|im_end|>
-    
     system_prompt = "You are a helpful mathematics assistant."
     
     full_text = (
@@ -199,13 +236,16 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
     for hook in hooks:
         hook.remove()
     
-    # Store projected activations for each layer and token
+    # Process activations and update top-k trackers
     for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
         for layer_idx in range(n_layers):
             # Get pre-computed activations from hooks
             activations = projected_activations[proj_type][layer_idx]
             
-            # Store each activation with context
+            # Store statistics
+            all_activations_stats[proj_type][layer_idx].extend(activations.tolist())
+            
+            # Update top-k tracker for each token
             for token_idx in range(len(tokens)):
                 # Get context window
                 context_start = max(0, token_idx - context_window)
@@ -213,6 +253,12 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
                 
                 context_before = tokens[context_start:token_idx]
                 context_after = tokens[token_idx+1:context_end]
+                
+                # Store context activations
+                context_activations = {}
+                for ctx_idx in range(context_start, context_end):
+                    if ctx_idx != token_idx:  # Don't duplicate the main token
+                        context_activations[ctx_idx] = activations[ctx_idx]
                 
                 example = ActivationExample(
                     rollout_idx=rollout_idx,
@@ -222,10 +268,12 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
                     context_before=context_before,
                     context_after=context_after,
                     layer=layer_idx,
-                    proj_type=proj_type
+                    proj_type=proj_type,
+                    context_activations=context_activations
                 )
                 
-                all_activations[proj_type][layer_idx].append(example)
+                # Add to top-k tracker
+                top_k_trackers[proj_type][layer_idx].add(example)
     
     # Clear GPU memory after each rollout to prevent OOM
     torch.cuda.empty_cache()
@@ -233,20 +281,30 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
 print("Finished processing all rollouts")
 
 # %%
-# Find top activating examples
-print("\nFinding top activating examples...")
+# Extract final top-k results
+print("\nExtracting top activating examples...")
+
+top_activations = {
+    proj_type: {
+        layer: {
+            'positive': tracker.get_top_positive(),
+            'negative': tracker.get_top_negative()
+        }
+        for layer, tracker in top_k_trackers[proj_type].items()
+    }
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']
+}
+
+# %%
+# Create HTML visualization
+print("\nCreating side-by-side visualization...")
 
 from IPython.display import HTML, display
 import html as html_lib
 
-def create_html_examples(examples: List[ActivationExample], title: str, all_examples: List[ActivationExample]) -> str:
+def create_html_examples(examples: List[ActivationExample], title: str, 
+                        min_act: float, max_act: float) -> str:
     """Create HTML visualization of activation examples with context"""
-    
-    # Calculate activation range for normalization
-    all_activations = [ex.activation for ex in all_examples]
-    min_act = min(all_activations)
-    max_act = max(all_activations)
-    act_range = max_act - min_act if max_act > min_act else 1
     
     html_parts = [f"<h3>{title}</h3>"]
     
@@ -257,48 +315,34 @@ def create_html_examples(examples: List[ActivationExample], title: str, all_exam
         # Add context before
         for j, token in enumerate(ex.context_before[-10:]):  # Show last 10 tokens
             # Get activation for this context token if available
-            ctx_activation = 0  # Default if we don't have the activation
-            # Find activation for this token position
-            # The position is: target position - (number of context tokens shown) + current index
             ctx_position = ex.token_idx - len(ex.context_before[-10:]) + j
-            for other_ex in all_examples:
-                if other_ex.rollout_idx == ex.rollout_idx and other_ex.token_idx == ctx_position:
-                    ctx_activation = other_ex.activation
-                    break
+            ctx_activation = ex.context_activations.get(ctx_position, 0) if ex.context_activations else 0
             
             # Normalize activation for coloring
-            # Use absolute value for intensity, sign for color
             intensity = min(abs(ctx_activation) / max(abs(min_act), abs(max_act)), 1.0) * 0.3
             if ctx_activation > 0:
-                bg_color = f"rgba(255, 0, 0, {intensity})"  # Light red for positive
+                bg_color = f"rgba(255, 0, 0, {intensity})"
             else:
-                bg_color = f"rgba(0, 0, 255, {intensity})"  # Light blue for negative
+                bg_color = f"rgba(0, 0, 255, {intensity})"
             
             token_display = html_lib.escape(token).replace('\n', '\\n')
             context_html.append(f'<span style="background-color: {bg_color}; padding: 2px;">{token_display}</span>')
         
         # Add the target token with red outline
-        # Use the same coloring scheme as other tokens
         intensity = min(abs(ex.activation) / max(abs(min_act), abs(max_act)), 1.0) * 0.3
         if ex.activation > 0:
-            bg_color = f"rgba(255, 0, 0, {intensity})"  # Light red for positive
+            bg_color = f"rgba(255, 0, 0, {intensity})"
         else:
-            bg_color = f"rgba(0, 0, 255, {intensity})"  # Light blue for negative
+            bg_color = f"rgba(0, 0, 255, {intensity})"
         
         token_display = html_lib.escape(ex.token).replace('\n', '\\n')
         context_html.append(f'<span style="border: 2px solid red; background-color: {bg_color}; padding: 2px; font-weight: bold;">{token_display}</span>')
         
         # Add context after
         for j, token in enumerate(ex.context_after[:10]):  # Show first 10 tokens
-            # Get activation for this context token
-            ctx_activation = 0
-            for other_ex in all_examples:
-                if other_ex.rollout_idx == ex.rollout_idx and other_ex.token_idx == ex.token_idx + j + 1:
-                    ctx_activation = other_ex.activation
-                    break
+            ctx_position = ex.token_idx + j + 1
+            ctx_activation = ex.context_activations.get(ctx_position, 0) if ex.context_activations else 0
             
-            # Normalize activation for coloring
-            # Use absolute value for intensity, sign for color
             intensity = min(abs(ctx_activation) / max(abs(min_act), abs(max_act)), 1.0) * 0.3
             if ctx_activation > 0:
                 bg_color = f"rgba(255, 0, 0, {intensity})"
@@ -316,11 +360,20 @@ def create_html_examples(examples: List[ActivationExample], title: str, all_exam
     
     return '\n'.join(html_parts)
 
-# %%
-# Create side-by-side visualization for each layer
-print("\nCreating side-by-side visualization...")
+# Pre-compute activation ranges for normalization
+print("Computing activation ranges...")
+activation_ranges = {}
+for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
+    for layer_idx in range(n_layers):
+        all_acts = all_activations_stats[proj_type][layer_idx]
+        if all_acts:
+            activation_ranges[(proj_type, layer_idx)] = (min(all_acts), max(all_acts))
+        else:
+            activation_ranges[(proj_type, layer_idx)] = (0, 0)
 
-# Create HTML output with side-by-side layout
+# No need for separate activation lookups - we have context_activations in each example
+
+# Create HTML output
 html_output = """
 <!DOCTYPE html>
 <html>
@@ -369,22 +422,22 @@ html_output = """
 </p>
 """
 
+print("Generating HTML...")
+
 # Process each layer
-for layer_idx in range(n_layers):
+for layer_idx in tqdm(range(n_layers), desc="Generating HTML"):
     html_output += f'<div class="layer-section">'
     html_output += f'<h2>Layer {layer_idx}</h2>'
     html_output += '<div class="projections-grid">'
     
     # Process all three projection types for this layer
     for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
-        examples = all_activations[proj_type][layer_idx]
+        # Get pre-computed top examples
+        top_positive = top_activations[proj_type][layer_idx]['positive']
+        top_negative = top_activations[proj_type][layer_idx]['negative']
         
-        # Sort by activation value
-        examples_sorted = sorted(examples, key=lambda x: x.activation)
-        
-        # Get top positive and negative examples
-        top_negative = examples_sorted[:top_k]
-        top_positive = examples_sorted[-top_k:][::-1]  # Reverse to get highest first
+        # Get ranges
+        min_act, max_act = activation_ranges[(proj_type, layer_idx)]
         
         # Create column for this projection type
         html_output += f'<div class="projection-column">'
@@ -392,11 +445,11 @@ for layer_idx in range(n_layers):
         
         # Add positive examples
         html_output += f'<div class="activation-type">Top {top_k} Positive Activations</div>'
-        html_output += create_html_examples(top_positive, "", examples).replace("<h3></h3>", "")
+        html_output += create_html_examples(top_positive, "", min_act, max_act).replace("<h3></h3>", "")
         
         # Add negative examples
         html_output += f'<div class="activation-type">Top {top_k} Negative Activations</div>'
-        html_output += create_html_examples(top_negative, "", examples).replace("<h3></h3>", "")
+        html_output += create_html_examples(top_negative, "", min_act, max_act).replace("<h3></h3>", "")
         
         html_output += '</div>'  # Close projection-column
     
@@ -420,81 +473,5 @@ print(f"Saved side-by-side activations to {filename}")
 # Also display in notebook
 display(HTML(html_output))
 
-
 # %%
-# Create a summary visualization showing activation patterns
-print("\n\nCreating summary statistics...")
-
-summary_data = []
-for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
-    for layer_idx in range(n_layers):
-        examples = all_activations[proj_type][layer_idx]
-        activations = np.array([ex.activation for ex in examples])
-        
-        summary_data.append({
-            'proj_type': proj_type,
-            'layer': layer_idx,
-            'mean': activations.mean(),
-            'std': activations.std(),
-            'min': activations.min(),
-            'max': activations.max(),
-            'q25': np.percentile(activations, 25),
-            'q50': np.percentile(activations, 50),
-            'q75': np.percentile(activations, 75),
-            'q95': np.percentile(activations, 95),
-            'q99': np.percentile(activations, 99)
-        })
-
-summary_df = pd.DataFrame(summary_data)
-print("\nSummary statistics by layer:")
-print(summary_df[summary_df['layer'].isin([0, n_layers//2, n_layers-1])].to_string())
-
-# %%
-# Save the top examples for further analysis
-print("\nSaving top examples to JSON...")
-
-top_examples_data = {}
-for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
-    top_examples_data[proj_type] = {}
-    
-    for layer_idx in range(n_layers):
-        examples = all_activations[proj_type][layer_idx]
-        examples_sorted = sorted(examples, key=lambda x: x.activation)
-        
-        # Get top examples
-        top_negative = examples_sorted[:top_k]
-        top_positive = examples_sorted[-top_k:][::-1]
-        
-        # Convert to serializable format
-        layer_data = {
-            'top_positive': [
-                {
-                    'rollout_idx': ex.rollout_idx,
-                    'token_idx': ex.token_idx,
-                    'token': ex.token,
-                    'activation': float(ex.activation),
-                    'context': ''.join(ex.context_before[-5:]) + f'[{ex.token}]' + ''.join(ex.context_after[:5])
-                }
-                for ex in top_positive
-            ],
-            'top_negative': [
-                {
-                    'rollout_idx': ex.rollout_idx,
-                    'token_idx': ex.token_idx,
-                    'token': ex.token,
-                    'activation': float(ex.activation),
-                    'context': ''.join(ex.context_before[-5:]) + f'[{ex.token}]' + ''.join(ex.context_after[:5])
-                }
-                for ex in top_negative
-            ]
-        }
-        
-        top_examples_data[proj_type][f'layer_{layer_idx}'] = layer_data
-
-# Save to file
-with open('lora_top_activating_examples.json', 'w') as f:
-    json.dump(top_examples_data, f, indent=2)
-
-print("Saved top examples to lora_top_activating_examples.json")
-
-# %%
+print("\nDone!")
