@@ -44,19 +44,21 @@ print("Loading LoRA adapter...")
 model = PeftModel.from_pretrained(model, lora_dir, torch_dtype=torch.bfloat16)
 
 # %%
-# Extract A matrices for gate_proj and up_proj from each layer
-print("Extracting A matrices for gate_proj and up_proj...")
+# Extract A matrices for all projections
+print("Extracting LoRA A matrices...")
 
 probe_directions = {
     'gate_proj': {},
-    'up_proj': {}
+    'up_proj': {},
+    'down_proj': {}
 }
 
 # Get the number of layers
 n_layers = model.config.num_hidden_layers
 
 for layer_idx in range(n_layers):
-    for proj_type in ['gate_proj', 'up_proj']:
+    # Extract A matrices for all projections
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
         # Access the module directly
         module = model.model.model.layers[layer_idx].mlp.__getattr__(proj_type)
         
@@ -64,12 +66,15 @@ for layer_idx in range(n_layers):
         if hasattr(module, 'lora_A'):
             # Get the A matrix from the LoRA adapter
             lora_A_weight = module.lora_A['default'].weight.data
-            # For rank-1, this could be shape [hidden_size, 1] or [1, hidden_size]
-            # We want a 1D vector of shape [hidden_size]
+            # For rank-1, this could be shape [input_dim, 1] or [1, input_dim]
+            # We want a 1D vector of shape [input_dim]
             probe_direction = lora_A_weight.squeeze()
             probe_directions[proj_type][layer_idx] = probe_direction
 
 print(f"Extracted directions for {len(probe_directions['gate_proj'])} layers")
+print(f"Gate proj directions: {len(probe_directions['gate_proj'])}")
+print(f"Up proj directions: {len(probe_directions['up_proj'])}")
+print(f"Down proj directions: {len(probe_directions['down_proj'])}")
 
 # %%
 # Load s1K-1.1 dataset
@@ -98,13 +103,13 @@ class ActivationExample:
 # Storage for all activations
 all_activations = {
     'gate_proj': {layer: [] for layer in range(n_layers)},
-    'up_proj': {layer: [] for layer in range(n_layers)}
+    'up_proj': {layer: [] for layer in range(n_layers)},
+    'down_proj': {layer: [] for layer in range(n_layers)}
 }
 
 # %%
 # Process rollouts
-# Using only 10 examples for faster processing
-num_examples = min(10, len(dataset))
+num_examples = min(100, len(dataset))
 print(f"Processing {num_examples} rollouts...")
 
 # Process rollouts - using DeepSeek traces and attempts
@@ -144,20 +149,46 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
         decoded = tokenizer.decode([token_id])
         tokens.append(decoded)
     
-    # Storage for residual streams
-    residual_streams = {}
+    # Storage for projected activations only (to save memory)
+    projected_activations = {
+        'gate_proj': {},
+        'up_proj': {},
+        'down_proj': {}
+    }
     
-    # Hook function to capture post-layernorm (pre-MLP) residual stream
-    def make_hook(layer_idx):
+    # Hook function to compute gate/up projections from pre-MLP residual
+    def make_pre_mlp_hook(layer_idx):
         def hook(module, input, output):
-            residual_streams[layer_idx] = output.detach()
+            pre_mlp = output.detach()[0]  # [seq_len, hidden_size]
+            # Compute projections for gate and up immediately
+            for proj_type in ['gate_proj', 'up_proj']:
+                probe_dir = probe_directions[proj_type][layer_idx]
+                activations = torch.matmul(pre_mlp.float(), probe_dir)  # [seq_len]
+                projected_activations[proj_type][layer_idx] = activations.cpu().numpy()
+        return hook
+    
+    # Hook function to compute down_proj projections from post-SwiGLU
+    def make_down_proj_hook(layer_idx):
+        def hook(module, input, output):
+            # Get the post-SwiGLU activations (input to down_proj)
+            post_swiglu = input[0].detach()[0]  # [seq_len, intermediate_size]
+            # Project onto the A matrix
+            probe_dir = probe_directions['down_proj'][layer_idx]
+            activations = torch.matmul(post_swiglu.float(), probe_dir)  # [seq_len]
+            projected_activations['down_proj'][layer_idx] = activations.cpu().numpy()
         return hook
     
     # Register hooks
     hooks = []
     for layer_idx in range(n_layers):
+        # Pre-MLP hook (computes gate/up projections)
         layernorm = model.model.model.layers[layer_idx].post_attention_layernorm
-        hook = layernorm.register_forward_hook(make_hook(layer_idx))
+        hook = layernorm.register_forward_hook(make_pre_mlp_hook(layer_idx))
+        hooks.append(hook)
+        
+        # Down-proj hook (computes down projections)
+        down_proj = model.model.model.layers[layer_idx].mlp.down_proj
+        hook = down_proj.register_forward_hook(make_down_proj_hook(layer_idx))
         hooks.append(hook)
     
     # Run forward pass
@@ -168,16 +199,11 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
     for hook in hooks:
         hook.remove()
     
-    # Compute probe activations for each layer and token
-    for proj_type in ['gate_proj', 'up_proj']:
+    # Store projected activations for each layer and token
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
         for layer_idx in range(n_layers):
-            # Get probe direction and residual stream
-            probe_dir = probe_directions[proj_type][layer_idx]
-            residual = residual_streams[layer_idx][0]  # [seq_len, hidden_size]
-            
-            # Compute activations
-            activations = torch.matmul(residual.float(), probe_dir)  # [seq_len]
-            activations = activations.cpu().numpy()
+            # Get pre-computed activations from hooks
+            activations = projected_activations[proj_type][layer_idx]
             
             # Store each activation with context
             for token_idx in range(len(tokens)):
@@ -201,9 +227,8 @@ for rollout_idx in tqdm(range(num_examples), desc="Processing rollouts"):
                 
                 all_activations[proj_type][layer_idx].append(example)
     
-    # Clear GPU memory periodically
-    if rollout_idx % 10 == 0:
-        torch.cuda.empty_cache()
+    # Clear GPU memory after each rollout to prevent OOM
+    torch.cuda.empty_cache()
 
 print("Finished processing all rollouts")
 
@@ -253,8 +278,15 @@ def create_html_examples(examples: List[ActivationExample], title: str, all_exam
             context_html.append(f'<span style="background-color: {bg_color}; padding: 2px;">{token_display}</span>')
         
         # Add the target token with red outline
+        # Use the same coloring scheme as other tokens
+        intensity = min(abs(ex.activation) / max(abs(min_act), abs(max_act)), 1.0) * 0.3
+        if ex.activation > 0:
+            bg_color = f"rgba(255, 0, 0, {intensity})"  # Light red for positive
+        else:
+            bg_color = f"rgba(0, 0, 255, {intensity})"  # Light blue for negative
+        
         token_display = html_lib.escape(ex.token).replace('\n', '\\n')
-        context_html.append(f'<span style="border: 2px solid red; background-color: yellow; padding: 2px; font-weight: bold;">{token_display}</span>')
+        context_html.append(f'<span style="border: 2px solid red; background-color: {bg_color}; padding: 2px; font-weight: bold;">{token_display}</span>')
         
         # Add context after
         for j, token in enumerate(ex.context_after[:10]):  # Show first 10 tokens
@@ -302,7 +334,7 @@ html_output = """
         .layer-section { margin-bottom: 50px; }
         .projections-grid { 
             display: grid; 
-            grid-template-columns: 1fr 1fr; 
+            grid-template-columns: 1fr 1fr 1fr; 
             gap: 20px;
             margin-top: 20px;
         }
@@ -331,7 +363,10 @@ html_output = """
     </style>
 </head>
 <body>
-<h1>LoRA Probe Activations - Gate and Up Projections Side by Side</h1>
+<h1>LoRA Probe Activations - Gate, Up, and Down Projections</h1>
+<p style="text-align: center; color: #666; margin-bottom: 30px;">
+    All projections show: input activations ⋅ A matrix (rank-1 LoRA neuron activations)
+</p>
 """
 
 # Process each layer
@@ -340,8 +375,8 @@ for layer_idx in range(n_layers):
     html_output += f'<h2>Layer {layer_idx}</h2>'
     html_output += '<div class="projections-grid">'
     
-    # Process both projection types for this layer
-    for proj_type in ['gate_proj', 'up_proj']:
+    # Process all three projection types for this layer
+    for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
         examples = all_activations[proj_type][layer_idx]
         
         # Sort by activation value
@@ -391,7 +426,7 @@ display(HTML(html_output))
 print("\n\nCreating summary statistics...")
 
 summary_data = []
-for proj_type in ['gate_proj', 'up_proj']:
+for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
     for layer_idx in range(n_layers):
         examples = all_activations[proj_type][layer_idx]
         activations = np.array([ex.activation for ex in examples])
@@ -419,7 +454,7 @@ print(summary_df[summary_df['layer'].isin([0, n_layers//2, n_layers-1])].to_stri
 print("\nSaving top examples to JSON...")
 
 top_examples_data = {}
-for proj_type in ['gate_proj', 'up_proj']:
+for proj_type in ['gate_proj', 'up_proj', 'down_proj']:
     top_examples_data[proj_type] = {}
     
     for layer_idx in range(n_layers):
