@@ -15,7 +15,7 @@ import json
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/root/reasoning_interp/ckpts_1.1"
+lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 context_window = 10  # Number of tokens before and after
 top_k = 16  # Number of top activating examples
@@ -285,31 +285,63 @@ def create_html_examples(examples: List[ActivationExample], title: str, all_exam
     return '\n'.join(html_parts)
 
 # %%
-# Analyze each probe type and layer
-html_outputs = {}
+# Create side-by-side visualization for each layer
+print("\nCreating side-by-side visualization...")
 
-for proj_type in ['gate_proj', 'up_proj']:
-    # Create HTML output for this probe type
-    html_output = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{proj_type.upper()} Probe Activations</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; }}
-            h1 {{ color: #333; }}
-            h2 {{ color: #666; margin-top: 30px; }}
-            h3 {{ color: #888; margin-top: 20px; }}
-            .example {{ margin: 10px 0; font-family: monospace; line-height: 1.8; }}
-            hr {{ margin: 30px 0; }}
-        </style>
-    </head>
-    <body>
-    <h1>{proj_type.upper()} Probe Activations</h1>
-    """
+# Create HTML output with side-by-side layout
+html_output = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LoRA Probe Activations - Side by Side</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #333; text-align: center; }
+        h2 { color: #666; margin-top: 40px; margin-bottom: 20px; }
+        h3 { color: #888; margin-top: 20px; }
+        .layer-section { margin-bottom: 50px; }
+        .projections-grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .projection-column { 
+            border: 1px solid #ddd; 
+            padding: 15px; 
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .projection-column h3 { 
+            margin-top: 0; 
+            text-align: center;
+            background-color: #e8e8e8;
+            padding: 10px;
+            margin: -15px -15px 15px -15px;
+            border-radius: 5px 5px 0 0;
+        }
+        .example { margin: 10px 0; font-family: monospace; line-height: 1.8; }
+        hr { margin: 30px 0; border: 1px solid #ddd; }
+        .activation-type { 
+            font-weight: bold; 
+            color: #555; 
+            margin-top: 15px; 
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+<h1>LoRA Probe Activations - Gate and Up Projections Side by Side</h1>
+"""
+
+# Process each layer
+for layer_idx in range(n_layers):
+    html_output += f'<div class="layer-section">'
+    html_output += f'<h2>Layer {layer_idx}</h2>'
+    html_output += '<div class="projections-grid">'
     
-    # Process all layers
-    for layer_idx in range(n_layers):
+    # Process both projection types for this layer
+    for proj_type in ['gate_proj', 'up_proj']:
         examples = all_activations[proj_type][layer_idx]
         
         # Sort by activation value
@@ -319,86 +351,40 @@ for proj_type in ['gate_proj', 'up_proj']:
         top_negative = examples_sorted[:top_k]
         top_positive = examples_sorted[-top_k:][::-1]  # Reverse to get highest first
         
-        # Add layer header
-        html_output += f"<h2>Layer {layer_idx}</h2>"
+        # Create column for this projection type
+        html_output += f'<div class="projection-column">'
+        html_output += f'<h3>{proj_type.upper()}</h3>'
         
-        # Create HTML for positive examples
-        html_output += create_html_examples(top_positive, f"Top {top_k} Positive Activations", examples)
+        # Add positive examples
+        html_output += f'<div class="activation-type">Top {top_k} Positive Activations</div>'
+        html_output += create_html_examples(top_positive, "", examples).replace("<h3></h3>", "")
         
-        # Create HTML for negative examples  
-        html_output += create_html_examples(top_negative, f"Top {top_k} Negative Activations", examples)
+        # Add negative examples
+        html_output += f'<div class="activation-type">Top {top_k} Negative Activations</div>'
+        html_output += create_html_examples(top_negative, "", examples).replace("<h3></h3>", "")
         
-        html_output += "<hr style='margin: 30px 0;'>"
+        html_output += '</div>'  # Close projection-column
     
-    html_output += """
-    </body>
-    </html>
-    """
+    html_output += '</div>'  # Close projections-grid
+    html_output += '</div>'  # Close layer-section
     
-    # Save to file
-    filename = f"lora_activations_{proj_type}.html"
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(html_output)
-    print(f"Saved {proj_type} activations to {filename}")
-    
-    # Also display in notebook
-    display(HTML(html_output))
-    
-    # Store for combined output
-    html_outputs[proj_type] = html_output
+    if layer_idx < n_layers - 1:
+        html_output += '<hr>'
 
-# %%
-# Create a combined HTML file with both probe types
-print("\nCreating combined HTML file...")
-
-combined_html = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>LoRA Probe Activations - All Types</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1 { color: #333; }
-        h2 { color: #666; margin-top: 30px; }
-        h3 { color: #888; margin-top: 20px; }
-        .example { margin: 10px 0; font-family: monospace; line-height: 1.8; }
-        hr { margin: 30px 0; }
-        .toc { background: #f5f5f5; padding: 20px; margin-bottom: 30px; }
-        .toc a { color: #333; text-decoration: none; margin: 0 10px; }
-        .toc a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>LoRA Probe Activations - Combined Results</h1>
-    <div class="toc">
-        <strong>Navigation:</strong>
-        <a href="#gate_proj">Gate Projections</a> |
-        <a href="#up_proj">Up Projections</a>
-    </div>
-"""
-
-# Add gate_proj section
-combined_html += '<div id="gate_proj">'
-combined_html += html_outputs['gate_proj'].split('<body>')[1].split('</body>')[0]
-combined_html += '</div>'
-
-# Add separator
-combined_html += '<hr style="border: 2px solid #333; margin: 50px 0;">'
-
-# Add up_proj section
-combined_html += '<div id="up_proj">'
-combined_html += html_outputs['up_proj'].split('<body>')[1].split('</body>')[0]
-combined_html += '</div>'
-
-combined_html += """
+html_output += """
 </body>
 </html>
 """
 
-# Save combined file
-with open('lora_activations_combined.html', 'w', encoding='utf-8') as f:
-    f.write(combined_html)
-print("Saved combined activations to lora_activations_combined.html")
+# Save to file
+filename = "lora_activations_side_by_side.html"
+with open(filename, 'w', encoding='utf-8') as f:
+    f.write(html_output)
+print(f"Saved side-by-side activations to {filename}")
+
+# Also display in notebook
+display(HTML(html_output))
+
 
 # %%
 # Create a summary visualization showing activation patterns
