@@ -10,7 +10,7 @@ import glob
 
 # %%
 # Configuration
-lora_path = "/root/s1_peft/ckpts_1.1"
+lora_path = "/workspace/models/ckpts_1.1"
 rank = 1  # Analyzing rank-1 LoRA
 
 # Find the rank-1 LoRA checkpoint
@@ -73,28 +73,42 @@ for key, tensor in lora_weights.items():
 
 # %%
 # For rank-1 LoRA, extract the direction vectors
-# B matrices have shape [out_dim, rank=1], so we squeeze them to get vectors
+# For down_proj: B matrices (what layers write to residual stream) have shape [d_model, rank=1]
+# For up_proj/gate_proj: A matrices (what layers read from residual stream) have shape [rank=1, d_model]
 
 direction_vectors = {}
 
+# Only process MLP projections
+mlp_projections = ['down_proj', 'up_proj', 'gate_proj']
+
 for proj_type, weights in weight_groups.items():
-    if not weights:
+    if not weights or proj_type not in mlp_projections:
         continue
         
     vectors = []
     layer_indices = []
     
     for i in range(64):  # Qwen-2.5-32B has 64 layers
-        b_key = f'layer_{i}_B'
-        if b_key in weights:
-            # B matrix shape: [out_dim, 1] for rank-1
-            vector = weights[b_key].squeeze(-1)  # Remove rank dimension
-            vectors.append(vector)
-            layer_indices.append(i)
+        if proj_type == 'down_proj':
+            # For down_proj, use B matrix (what is written to residual stream)
+            b_key = f'layer_{i}_B'
+            if b_key in weights:
+                # B matrix shape: [d_model, 1] for rank-1
+                vector = weights[b_key].squeeze(-1)  # Remove rank dimension
+                vectors.append(vector)
+                layer_indices.append(i)
+        elif proj_type in ['up_proj', 'gate_proj']:
+            # For up_proj/gate_proj, use A matrix (what is read from residual stream)
+            a_key = f'layer_{i}_A'
+            if a_key in weights:
+                # A matrix shape: [1, d_model] for rank-1
+                vector = weights[a_key].squeeze(0)  # Remove rank dimension
+                vectors.append(vector)
+                layer_indices.append(i)
     
     if vectors:
         direction_vectors[proj_type] = {
-            'vectors': torch.stack(vectors),  # Shape: [n_layers, out_dim]
+            'vectors': torch.stack(vectors),  # Shape: [n_layers, d_model]
             'layers': layer_indices
         }
 
@@ -119,17 +133,59 @@ for proj_type, data in direction_vectors.items():
     cosine_similarities[proj_type] = compute_cosine_similarity(data['vectors'])
 
 # %%
-# Plot cosine similarity matrices
+# Compute cross-projection cosine similarities
+def compute_cross_projection_similarity(vectors1, vectors2):
+    """Compute cosine similarity between vectors from two different projections."""
+    # Normalize vectors
+    norms1 = torch.norm(vectors1, dim=1, keepdim=True)
+    norms2 = torch.norm(vectors2, dim=1, keepdim=True)
+    normalized1 = vectors1 / (norms1 + 1e-8)
+    normalized2 = vectors2 / (norms2 + 1e-8)
+    
+    # Compute cosine similarity
+    similarity = torch.mm(normalized1, normalized2.t())
+    return similarity.numpy()
+
+# Compute cross-projection similarities
+cross_similarities = {}
+
+# up_proj vs down_proj
+if 'up_proj' in direction_vectors and 'down_proj' in direction_vectors:
+    cross_similarities['up_proj_vs_down_proj'] = compute_cross_projection_similarity(
+        direction_vectors['up_proj']['vectors'],
+        direction_vectors['down_proj']['vectors']
+    )
+
+# gate_proj vs down_proj
+if 'gate_proj' in direction_vectors and 'down_proj' in direction_vectors:
+    cross_similarities['gate_proj_vs_down_proj'] = compute_cross_projection_similarity(
+        direction_vectors['gate_proj']['vectors'],
+        direction_vectors['down_proj']['vectors']
+    )
+
+# up_proj vs gate_proj
+if 'up_proj' in direction_vectors and 'gate_proj' in direction_vectors:
+    cross_similarities['up_proj_vs_gate_proj'] = compute_cross_projection_similarity(
+        direction_vectors['up_proj']['vectors'],
+        direction_vectors['gate_proj']['vectors']
+    )
+
+print("\nCross-projection similarity matrices computed:")
+for name, matrix in cross_similarities.items():
+    print(f"  {name}: {matrix.shape}")
+
+# %%
+# Plot cosine similarity matrices for MLP projections
+mlp_cosine_similarities = {k: v for k, v in cosine_similarities.items() if k in mlp_projections}
+
 fig = make_subplots(
-    rows=2, cols=4,
-    subplot_titles=list(cosine_similarities.keys()),
-    horizontal_spacing=0.05,
-    vertical_spacing=0.1
+    rows=1, cols=3,
+    subplot_titles=list(mlp_cosine_similarities.keys()),
+    horizontal_spacing=0.1
 )
 
-for idx, (proj_type, sim_matrix) in enumerate(cosine_similarities.items()):
-    row = idx // 4 + 1
-    col = idx % 4 + 1
+for idx, (proj_type, sim_matrix) in enumerate(mlp_cosine_similarities.items()):
+    col = idx + 1
     
     heatmap = go.Heatmap(
         z=sim_matrix,
@@ -137,30 +193,30 @@ for idx, (proj_type, sim_matrix) in enumerate(cosine_similarities.items()):
         zmid=0,
         zmin=-1,
         zmax=1,
-        colorbar=dict(len=0.4, y=0.5) if col == 4 else dict(showticklabels=False),
-        showscale=(col == 4)  # Only show colorbar for rightmost plots
+        colorbar=dict(len=0.8, y=0.5) if col == 3 else dict(showticklabels=False),
+        showscale=(col == 3)  # Only show colorbar for rightmost plots
     )
     
-    fig.add_trace(heatmap, row=row, col=col)
+    fig.add_trace(heatmap, row=1, col=col)
     
     # Update axes
     fig.update_xaxes(
         title_text="Layer",
         tickmode='linear',
         dtick=8,
-        row=row, col=col
+        row=1, col=col
     )
     fig.update_yaxes(
         title_text="Layer",
         tickmode='linear',
         dtick=8,
-        row=row, col=col
+        row=1, col=col
     )
 
 fig.update_layout(
-    title=f"Cosine Similarity of Rank-{rank} LoRA Direction Vectors",
-    width=1400,
-    height=700,
+    title=f"Cosine Similarity of Rank-{rank} LoRA Direction Vectors (MLP Projections)",
+    width=1200,
+    height=400,
     showlegend=False
 )
 
@@ -198,9 +254,56 @@ fig.update_layout(
 fig.show()
 
 # %%
+# Plot cross-projection similarity matrices
+fig = make_subplots(
+    rows=1, cols=3,
+    subplot_titles=list(cross_similarities.keys()),
+    horizontal_spacing=0.1
+)
+
+for idx, (name, sim_matrix) in enumerate(cross_similarities.items()):
+    col = idx + 1
+    
+    heatmap = go.Heatmap(
+        z=sim_matrix,
+        colorscale='RdBu',
+        zmid=0,
+        zmin=-1,
+        zmax=1,
+        colorbar=dict(len=0.8, y=0.5) if col == 3 else dict(showticklabels=False),
+        showscale=(col == 3)  # Only show colorbar for rightmost plot
+    )
+    
+    fig.add_trace(heatmap, row=1, col=col)
+    
+    # Update axes
+    proj1, proj2 = name.split('_vs_')
+    fig.update_xaxes(
+        title_text=f"{proj2} Layer",
+        tickmode='linear',
+        dtick=8,
+        row=1, col=col
+    )
+    fig.update_yaxes(
+        title_text=f"{proj1} Layer",
+        tickmode='linear',
+        dtick=8,
+        row=1, col=col
+    )
+
+fig.update_layout(
+    title=f"Cross-Projection Cosine Similarity of Rank-{rank} LoRA Direction Vectors",
+    width=1400,
+    height=500,
+    showlegend=False
+)
+
+fig.show()
+
+# %%
 # Compute statistics for each projection type
-print("\nCosine Similarity Statistics:\n")
-for proj_type, sim_matrix in cosine_similarities.items():
+print("\nWithin-Projection Cosine Similarity Statistics:\n")
+for proj_type, sim_matrix in mlp_cosine_similarities.items():
     # Get off-diagonal elements
     n = sim_matrix.shape[0]
     mask = ~np.eye(n, dtype=bool)
@@ -211,6 +314,20 @@ for proj_type, sim_matrix in cosine_similarities.items():
     print(f"  Std deviation: {off_diagonal.std():.3f}")
     print(f"  Min similarity: {off_diagonal.min():.3f}")
     print(f"  Max similarity: {off_diagonal.max():.3f}")
+    print()
+
+# %%
+# Compute statistics for cross-projection similarities
+print("\nCross-Projection Cosine Similarity Statistics:\n")
+for name, sim_matrix in cross_similarities.items():
+    # All elements are cross-projection (no diagonal to exclude)
+    flat_matrix = sim_matrix.flatten()
+    
+    print(f"{name}:")
+    print(f"  Mean similarity: {flat_matrix.mean():.3f}")
+    print(f"  Std deviation: {flat_matrix.std():.3f}")
+    print(f"  Min similarity: {flat_matrix.min():.3f}")
+    print(f"  Max similarity: {flat_matrix.max():.3f}")
     print()
 
 # %%
