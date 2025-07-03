@@ -15,7 +15,7 @@ from IPython.display import HTML, display
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/root/reasoning_interp/ckpts_1.1"
+lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
