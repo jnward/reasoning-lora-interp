@@ -14,13 +14,17 @@ import textwrap
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/root/s1_peft/ckpts_1.1"
+lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
 lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*")
 lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
+
+# Ablation strategy: if True, ablate most important layers first; if False, ablate least important first
+ABLATE_MOST_IMPORTANT_FIRST = True
+print(f"\nAblation strategy: {'Most' if ABLATE_MOST_IMPORTANT_FIRST else 'Least'} important layers first")
 
 # %%
 # Load tokenizer
@@ -205,28 +209,28 @@ print(f"Baseline (attention ablated) - Mean KL: {baseline_metrics['mean_kl']:.4f
 
 # %%
 # Save attention-ablated version
-print("\nSaving LoRA with attention matrices ablated...")
+# print("\nSaving LoRA with attention matrices ablated...")
 
-# Create new directory name
-import os
-original_dir_name = os.path.basename(lora_dir)
-attn_ablated_dir_name = original_dir_name + "_attn_ablated"
-attn_ablated_dir_path = os.path.join(os.path.dirname(lora_dir), attn_ablated_dir_name)
+# # Create new directory name
+# import os
+# original_dir_name = os.path.basename(lora_dir)
+# attn_ablated_dir_name = original_dir_name + "_attn_ablated"
+# attn_ablated_dir_path = os.path.join(os.path.dirname(lora_dir), attn_ablated_dir_name)
 
-print(f"Saving to: {attn_ablated_dir_path}")
+# print(f"Saving to: {attn_ablated_dir_path}")
 
-# Save the model with attention ablated
-model.save_pretrained(attn_ablated_dir_path)
+# # Save the model with attention ablated
+# model.save_pretrained(attn_ablated_dir_path)
 
 # Also copy the tokenizer files if they exist
-import shutil
-tokenizer_files = ['tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json']
-for file in tokenizer_files:
-    src_path = os.path.join(lora_dir, file)
-    if os.path.exists(src_path):
-        shutil.copy2(src_path, os.path.join(attn_ablated_dir_path, file))
+# import shutil
+# tokenizer_files = ['tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json']
+# for file in tokenizer_files:
+#     src_path = os.path.join(lora_dir, file)
+#     if os.path.exists(src_path):
+#         shutil.copy2(src_path, os.path.join(attn_ablated_dir_path, file))
 
-print(f"Successfully saved attention-ablated LoRA to: {attn_ablated_dir_path}")
+# print(f"Successfully saved attention-ablated LoRA to: {attn_ablated_dir_path}")
 
 # %%
 # Step 2: Measure importance of each MLP layer
@@ -260,19 +264,19 @@ for layer_idx in tqdm(range(n_layers), desc="Testing MLP layers"):
         # Restore this layer
         restore_modules(layer_ablated)
 
-# Create dataframe and sort by importance (least important first)
+# Create dataframe and sort by importance
 df_importance = pd.DataFrame(layer_importance)
-df_importance = df_importance.sort_values('kl_increase')
+df_importance = df_importance.sort_values('kl_increase', ascending=not ABLATE_MOST_IMPORTANT_FIRST)
 
-print("\nLeast important MLP layers (by mean KL increase):")
+print(f"\n{'Most' if ABLATE_MOST_IMPORTANT_FIRST else 'Least'} important MLP layers (by mean KL increase):")
 print(df_importance.head(10))
 
 # %%
-# Step 3: Iteratively ablate least important layers
-print("\nStep 3: Iteratively ablating least important MLP layers...")
+# Step 3: Iteratively ablate layers based on importance
+print(f"\nStep 3: Iteratively ablating {'most' if ABLATE_MOST_IMPORTANT_FIRST else 'least'} important MLP layers...")
 
-kl_threshold = 0.1
-# kl_threshold = 1.0
+# kl_threshold = 0.1
+kl_threshold = 1.0
 
 # Track ablation progress
 ablation_history = []
@@ -282,29 +286,63 @@ ablated_layers = set()  # Keep track of which layers are ablated
 current_mean_kl = baseline_metrics['mean_kl']
 iteration = 0
 
-while current_mean_kl < kl_threshold and iteration < len(df_importance):
-    # Get next least important layer
-    next_layer = None
-    for _, row in df_importance.iterrows():
-        if row['layer'] not in ablated_layers:
-            next_layer = int(row['layer'])
-            break
+# Get all non-ablated layers
+remaining_layer_indices = set(range(n_layers))
+
+while current_mean_kl < kl_threshold and len(remaining_layer_indices) > len(ablated_layers):
+    print(f"\nIteration {iteration + 1}: Recomputing importance for {len(remaining_layer_indices) - len(ablated_layers)} remaining layers...")
     
-    if next_layer is None:
-        print("No more layers to ablate")
+    # Recompute importance for all remaining (non-ablated) layers
+    layer_importance_current = []
+    
+    for layer_idx in tqdm(sorted(remaining_layer_indices - ablated_layers), desc="Testing remaining MLP layers"):
+        # Temporarily ablate this layer's MLP
+        layer_ablated = []
+        for matrix_type in mlp_matrices:
+            modules = ablate_matrix_type_in_layer(model, layer_idx, matrix_type)
+            layer_ablated.extend(modules)
+        
+        if layer_ablated:  # Only if we found MLP modules in this layer
+            # Compute metrics with this layer ablated
+            metrics = compute_metrics(model, all_rollouts)
+            
+            # Calculate increase in KL from current state
+            kl_increase = metrics['mean_kl'] - current_mean_kl
+            
+            layer_importance_current.append({
+                'layer': layer_idx,
+                'kl_increase': kl_increase,
+                'max_kl': metrics['max_kl'],
+                'mean_kl': metrics['mean_kl']
+            })
+            
+            # Restore this layer
+            restore_modules(layer_ablated)
+    
+    # Sort by importance based on ablation strategy
+    layer_importance_current.sort(key=lambda x: x['kl_increase'], reverse=ABLATE_MOST_IMPORTANT_FIRST)
+    
+    if not layer_importance_current:
+        print("No more layers to test")
         break
     
-    # Ablate this layer's MLP temporarily
-    print(f"\nIteration {iteration + 1}: Testing ablation of layer {next_layer}")
+    # Get the next layer to ablate based on strategy
+    next_layer_info = layer_importance_current[0]
+    next_layer = next_layer_info['layer']
+    
+    importance_desc = "Most" if ABLATE_MOST_IMPORTANT_FIRST else "Least"
+    print(f"\n{importance_desc} important layer: {next_layer} (KL increase: {next_layer_info['kl_increase']:.4f})")
+    
+    # Ablate this layer's MLP permanently
+    print(f"Testing permanent ablation of layer {next_layer}")
     
     temp_ablated = []
     for matrix_type in mlp_matrices:
         modules = ablate_matrix_type_in_layer(model, next_layer, matrix_type)
         temp_ablated.extend(modules)
     
-    # Compute new metrics
-    metrics = compute_metrics(model, all_rollouts)
-    test_mean_kl = metrics['mean_kl']
+    # Get the actual KL with this layer ablated
+    test_mean_kl = next_layer_info['mean_kl']
     
     print(f"  Mean KL with layer {next_layer} ablated: {test_mean_kl:.4f} (ratio: {test_mean_kl / baseline_metrics['mean_kl']:.2f}x)")
     
@@ -316,13 +354,18 @@ while current_mean_kl < kl_threshold and iteration < len(df_importance):
         permanently_ablated.extend(temp_ablated)
         current_mean_kl = test_mean_kl
         
+        # Calculate instantaneous KL increase (from previous state)
+        instantaneous_kl_increase = test_mean_kl - (ablation_history[-1]['mean_kl'] if ablation_history else baseline_metrics['mean_kl'])
+        
         ablation_history.append({
             'iteration': iteration + 1,
             'layer_ablated': next_layer,
             'n_layers_ablated': len(ablated_layers),
-            'max_kl': metrics['max_kl'],
+            'max_kl': next_layer_info['max_kl'],
             'mean_kl': current_mean_kl,
             'kl_ratio': current_mean_kl / baseline_metrics['mean_kl'],
+            'kl_increase': next_layer_info['kl_increase'],
+            'instantaneous_kl_increase': instantaneous_kl_increase,
             'kept_ablation': True
         })
     else:
@@ -330,13 +373,18 @@ while current_mean_kl < kl_threshold and iteration < len(df_importance):
         print(f"  ✗ Restoring layer {next_layer} (KL exceeded threshold: {test_mean_kl:.4f} > {kl_threshold:.4f})")
         restore_modules(temp_ablated)
         
+        # Calculate instantaneous KL increase (from previous state)
+        instantaneous_kl_increase = test_mean_kl - (ablation_history[-1]['mean_kl'] if ablation_history else baseline_metrics['mean_kl'])
+        
         ablation_history.append({
             'iteration': iteration + 1,
             'layer_ablated': next_layer,
             'n_layers_ablated': len(ablated_layers),
-            'max_kl': metrics['max_kl'],
+            'max_kl': next_layer_info['max_kl'],
             'mean_kl': test_mean_kl,
             'kl_ratio': test_mean_kl / baseline_metrics['mean_kl'],
+            'kl_increase': next_layer_info['kl_increase'],
+            'instantaneous_kl_increase': instantaneous_kl_increase,
             'kept_ablation': False
         })
         
@@ -358,7 +406,7 @@ print(f"Percentage of MLP layers remaining: {(n_layers - len(ablated_layers)) / 
 
 # %%
 # Plot ablation progress
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
 
 # Plot KL divergence progression
 # Separate kept and restored ablations
@@ -390,6 +438,22 @@ ax2.set_ylabel('Number of MLP Layers Ablated')
 ax2.set_title('Cumulative Layers Ablated')
 ax2.grid(True, alpha=0.3)
 
+# Plot instantaneous KL increase for each layer
+ax3.bar(df_history['iteration'], df_history['instantaneous_kl_increase'], 
+        color=['green' if kept else 'red' for kept in df_history['kept_ablation']],
+        alpha=0.7, edgecolor='black')
+
+# Add layer numbers on top of bars
+for idx, row in df_history.iterrows():
+    ax3.text(row['iteration'], row['instantaneous_kl_increase'] + 0.001, 
+             str(row['layer_ablated']), ha='center', va='bottom', fontsize=8)
+
+ax3.set_xlabel('Iteration')
+ax3.set_ylabel('Instantaneous KL Increase')
+ax3.set_title('Impact of Each Layer Ablation (Green=Kept, Red=Restored)')
+ax3.grid(True, alpha=0.3)
+ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+
 plt.tight_layout()
 plt.show()
 
@@ -398,6 +462,101 @@ plt.show()
 remaining_layers = sorted(set(range(n_layers)) - ablated_layers)
 print(f"\nRemaining MLP layers ({len(remaining_layers)} total):")
 print(remaining_layers)
+
+# %%
+# Plot layers sorted by their impact
+fig, ax = plt.subplots(figsize=(12, 6))
+
+# Get only the kept ablations and sort by instantaneous KL increase
+kept_ablations = df_history[df_history['kept_ablation']].copy()
+# Sort based on ablation strategy - if we ablated most important first, we want to show them in reverse order
+kept_ablations_sorted = kept_ablations.sort_values('instantaneous_kl_increase', ascending=not ABLATE_MOST_IMPORTANT_FIRST)
+
+# Create bar plot
+bars = ax.bar(range(len(kept_ablations_sorted)), 
+               kept_ablations_sorted['instantaneous_kl_increase'],
+               color='steelblue', alpha=0.7, edgecolor='black')
+
+# Add layer numbers on top of bars
+for i, (idx, row) in enumerate(kept_ablations_sorted.iterrows()):
+    ax.text(i, row['instantaneous_kl_increase'] + 0.0005, 
+            f"L{row['layer_ablated']}", ha='center', va='bottom', fontsize=8, rotation=90)
+
+ax.set_xlabel('Layers (sorted by impact)', fontsize=12)
+ax.set_ylabel('Instantaneous KL Increase', fontsize=12)
+sort_order = "Most to Least" if ABLATE_MOST_IMPORTANT_FIRST else "Least to Most"
+ax.set_title(f'MLP Layers Sorted by Impact When Ablated ({sort_order} Important)', fontsize=14)
+ax.grid(True, alpha=0.3, axis='y')
+
+# Add a text box with statistics
+avg_impact = kept_ablations_sorted['instantaneous_kl_increase'].mean()
+median_impact = kept_ablations_sorted['instantaneous_kl_increase'].median()
+textstr = f'Avg impact: {avg_impact:.4f}\nMedian impact: {median_impact:.4f}'
+props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
+        verticalalignment='top', bbox=props)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+# Plot impact by layer number
+fig, ax = plt.subplots(figsize=(14, 6))
+
+# Create a mapping of layer number to impact
+layer_to_impact = {}
+for _, row in df_history.iterrows():
+    if row['kept_ablation']:
+        layer_to_impact[row['layer_ablated']] = row['instantaneous_kl_increase']
+
+# Create arrays for plotting
+layer_numbers = list(range(n_layers))
+impacts = []
+colors_impact = []
+
+for layer in layer_numbers:
+    if layer in layer_to_impact:
+        impacts.append(layer_to_impact[layer])
+        colors_impact.append('darkred')
+    else:
+        impacts.append(0)  # Not ablated
+        colors_impact.append('lightgray')
+
+# Create bar plot
+bars = ax.bar(layer_numbers, impacts, color=colors_impact, alpha=0.7, edgecolor='black', linewidth=0.5)
+
+# Highlight non-zero bars with their values
+for layer, impact in layer_to_impact.items():
+    if impact > 0.005:  # Only label significant impacts
+        ax.text(layer, impact + 0.0005, f'{impact:.3f}', ha='center', va='bottom', fontsize=7, rotation=90)
+
+ax.set_xlabel('Layer Number', fontsize=12)
+ax.set_ylabel('Instantaneous KL Increase When Ablated', fontsize=12)
+ax.set_title('Impact of Ablating Each MLP Layer by Position in Model', fontsize=14)
+ax.set_xlim(-0.5, n_layers - 0.5)
+ax.grid(True, alpha=0.3, axis='y')
+
+# Add horizontal lines to divide model sections
+for i in range(1, 4):
+    ax.axvline(x=i*16 - 0.5, color='gray', linestyle='--', alpha=0.5)
+
+# Add section labels
+section_y = ax.get_ylim()[1] * 0.95
+ax.text(8, section_y, 'Early', ha='center', fontsize=10, style='italic')
+ax.text(24, section_y, 'Early-Mid', ha='center', fontsize=10, style='italic')
+ax.text(40, section_y, 'Late-Mid', ha='center', fontsize=10, style='italic')
+ax.text(56, section_y, 'Late', ha='center', fontsize=10, style='italic')
+
+# Add statistics box
+n_ablated = len(layer_to_impact)
+total_impact = sum(layer_to_impact.values())
+textstr = f'Layers ablated: {n_ablated}/{n_layers}\nTotal KL increase: {total_impact:.4f}'
+props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
+        verticalalignment='top', bbox=props)
+
+plt.tight_layout()
+plt.show()
 
 # %%
 # Visualize which layers were ablated with ablation order
@@ -530,42 +689,42 @@ for line in minimal_text.split('\n')[:15]:
 
 # %%
 # Save minimal layers version
-if len(ablated_layers) > 0:
-    print(f"\nSaving minimal LoRA with {len(remaining_layers)} MLP layers...")
+# if len(ablated_layers) > 0:
+#     print(f"\nSaving minimal LoRA with {len(remaining_layers)} MLP layers...")
     
-    # The model already has attention ablated and minimal MLP layers
-    # Create new directory name
-    min_layers_dir_name = original_dir_name + "_min_layers"
-    min_layers_dir_path = os.path.join(os.path.dirname(lora_dir), min_layers_dir_name)
+#     # The model already has attention ablated and minimal MLP layers
+#     # Create new directory name
+#     min_layers_dir_name = original_dir_name + "_min_layers"
+#     min_layers_dir_path = os.path.join(os.path.dirname(lora_dir), min_layers_dir_name)
     
-    print(f"Saving to: {min_layers_dir_path}")
+#     print(f"Saving to: {min_layers_dir_path}")
     
-    # Save the model with minimal layers
-    model.save_pretrained(min_layers_dir_path)
+#     # Save the model with minimal layers
+#     model.save_pretrained(min_layers_dir_path)
     
-    # Copy tokenizer files if they exist
-    for file in tokenizer_files:
-        src_path = os.path.join(lora_dir, file)
-        if os.path.exists(src_path):
-            shutil.copy2(src_path, os.path.join(min_layers_dir_path, file))
+#     # Copy tokenizer files if they exist
+#     for file in tokenizer_files:
+#         src_path = os.path.join(lora_dir, file)
+#         if os.path.exists(src_path):
+#             shutil.copy2(src_path, os.path.join(min_layers_dir_path, file))
     
-    # Save metadata about which layers are active
-    import json
-    metadata = {
-        'original_model': original_dir_name,
-        'total_layers': n_layers,
-        'ablated_layers': sorted(list(ablated_layers)),
-        'remaining_layers': remaining_layers,
-        'n_remaining': len(remaining_layers),
-        'percent_remaining': len(remaining_layers) / n_layers * 100,
-        'final_mean_kl': current_mean_kl,
-        'kl_threshold': kl_threshold
-    }
+#     # Save metadata about which layers are active
+#     import json
+#     metadata = {
+#         'original_model': original_dir_name,
+#         'total_layers': n_layers,
+#         'ablated_layers': sorted(list(ablated_layers)),
+#         'remaining_layers': remaining_layers,
+#         'n_remaining': len(remaining_layers),
+#         'percent_remaining': len(remaining_layers) / n_layers * 100,
+#         'final_mean_kl': current_mean_kl,
+#         'kl_threshold': kl_threshold
+#     }
     
-    with open(os.path.join(min_layers_dir_path, 'ablation_metadata.json'), 'w') as f:
-        json.dump(metadata, f, indent=2)
+#     with open(os.path.join(min_layers_dir_path, 'ablation_metadata.json'), 'w') as f:
+#         json.dump(metadata, f, indent=2)
     
-    print(f"Successfully saved minimal LoRA to: {min_layers_dir_path}")
-    print(f"Active MLP layers: {len(remaining_layers)} ({len(remaining_layers)/n_layers*100:.1f}%)")
+#     print(f"Successfully saved minimal LoRA to: {min_layers_dir_path}")
+#     print(f"Active MLP layers: {len(remaining_layers)} ({len(remaining_layers)/n_layers*100:.1f}%)")
 
 # %%

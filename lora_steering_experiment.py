@@ -17,7 +17,7 @@ lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 prefix_tokens = 100  # Number of tokens to generate for prefix
 additional_tokens = 100  # Additional tokens to generate with steering
-steering_strength = 10.0  # Default multiplier for steering
+steering_strength = 50.0  # Default multiplier for steering
 
 # Find the rank-1 LoRA checkpoint
 lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*")
@@ -277,7 +277,7 @@ for target_layer in tqdm(range(n_layers), desc="Testing layers"):
     # Get B matrix and scaling for this layer
     b_direction = b_matrices[target_layer].to(model.device)
     avg_norm = mlp_out_norms[target_layer]
-    steering_vector = b_direction * avg_norm * steering_strength
+    steering_vector = b_direction * np.sqrt(avg_norm) * steering_strength
     
     print(f"B matrix L2 norm: {torch.norm(b_direction).item():.3f}")
     print(f"Average MLP out norm: {avg_norm:.3f}")
