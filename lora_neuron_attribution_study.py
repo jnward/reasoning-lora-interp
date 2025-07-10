@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import glob
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, repeat_kv
 from peft import PeftModel
 from datasets import load_dataset
 import numpy as np
@@ -11,6 +12,8 @@ import gc
 from dataclasses import dataclass
 from tabulate import tabulate
 from tqdm import tqdm
+import types
+import math
 
 # %%
 # Configuration
@@ -24,131 +27,178 @@ lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
 
 # %%
-class StopGradientHooks:
-    """Manages stop-gradient hooks for LayerNorm and Attention patterns"""
+class AttentionLinearizer:
+    """Linearizes attention by treating attention patterns as constants"""
     
     def __init__(self, model):
         self.model = model
-        self.hooks = []
-        self.attention_hooks = []
-        self.layernorm_hooks = []
-        self.original_forwards = {}
+        self.original_attention_forwards = {}
         
-    def _stop_gradient_hook(self, module, input, output):
-        """Hook that stops gradients through the output"""
-        # Detach the output to stop gradient flow
-        # But keep the computation graph intact for other paths
-        return output.detach()
-    
-    def _create_attention_monkey_patch(self, original_forward):
-        """Create a monkey-patched forward function that stops gradients through attention patterns"""
-        def patched_forward(*args, **kwargs):
-            # Get the original module (self in the forward context)
-            module = args[0]
+    def linearize_all_attention_modules(self):
+        """Monkey-patch all attention modules to linearize attention patterns"""
+        count = 0
+        
+        # Check attention implementation type
+        sample_attn = self.model.model.model.layers[0].self_attn
+        attn_class = sample_attn.__class__.__name__
+        print(f"Detected attention implementation: {attn_class}")
+        
+        # Monkey-patch each attention layer
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            layer = self.model.model.model.layers[layer_idx]
+            attn_module = layer.self_attn
             
-            # Extract inputs
-            if len(args) > 1:
-                hidden_states = args[1]
-            else:
-                hidden_states = kwargs.get('hidden_states')
+            # Store original forward
+            self.original_attention_forwards[layer_idx] = attn_module.forward
             
-            # Call original forward to get all computations
-            # We need to handle output_attentions flag
-            original_output_attentions = kwargs.get('output_attentions', False)
-            kwargs['output_attentions'] = True  # Force attention weights output
+            # Create linearized forward
+            linearized_forward = self._create_linearized_attention_forward(
+                attn_module.forward, attn_module, layer_idx
+            )
             
-            # Get full output with attention weights
-            outputs = original_forward(*args, **kwargs)
+            # Replace forward method
+            attn_module.forward = linearized_forward
+            count += 1
             
-            # Process outputs based on structure
-            if isinstance(outputs, tuple):
-                attention_output = outputs[0]
-                attention_weights = outputs[1] if len(outputs) > 1 else None
+        print(f"Linearized {count} attention modules")
+        
+    def _create_linearized_attention_forward(self, original_forward, attn_module, layer_idx):
+        """Create a linearized forward function for attention"""
+        
+        def linearized_forward(self, hidden_states, *args, **kwargs):
+            # For simplicity, we'll call the original forward but with a patched F.scaled_dot_product_attention
+            
+            # Store the original SDPA function
+            original_sdpa = F.scaled_dot_product_attention
+            
+            # Create a patched version that detaches attention weights
+            def patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+                # Compute attention weights normally
+                L, S = query.size(-2), key.size(-2)
+                scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
                 
-                if attention_weights is not None:
-                    # Detach attention weights to stop gradients
-                    attention_weights = attention_weights.detach()
+                attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+                if is_causal:
+                    temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+                    attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+                    attn_bias.to(query.dtype)
+                    
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+                    else:
+                        attn_bias += attn_mask
+                        
+                attn_weight = query @ key.transpose(-2, -1) * scale_factor
+                attn_weight += attn_bias
+                attn_weight = torch.softmax(attn_weight, dim=-1)
                 
-                # Reconstruct output based on original request
-                if original_output_attentions:
-                    return (attention_output, attention_weights) + outputs[2:]
-                else:
-                    # Don't include attention weights if not originally requested
-                    return (attention_output,) + outputs[2:]
+                # CRITICAL: Detach attention weights here
+                attn_weight = attn_weight.detach()
+                
+                # Apply dropout if needed
+                if dropout_p > 0.0:
+                    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+                    
+                # Apply attention to values
+                return attn_weight @ value
             
+            # Temporarily replace F.scaled_dot_product_attention
+            F.scaled_dot_product_attention = patched_sdpa
+            
+            try:
+                # Call original forward with patched SDPA
+                outputs = original_forward(hidden_states, *args, **kwargs)
+            finally:
+                # Always restore original SDPA
+                F.scaled_dot_product_attention = original_sdpa
+                
             return outputs
-        
-        return patched_forward
+            
+        # Bind to the attention module
+        return linearized_forward.__get__(attn_module, attn_module.__class__)
+
+
+class LinearizedLayerNorm:
+    """Manages linearization of LayerNorm modules via monkey-patching"""
     
-    def _monkey_patch_attention_modules(self):
-        """Monkey-patch attention modules to stop gradients through attention patterns"""
+    def __init__(self, model):
+        self.model = model
         self.original_forwards = {}
         
-        for layer_idx in range(self.model.config.num_hidden_layers):
-            layer = self.model.model.model.layers[layer_idx]
+    def _create_linearized_forward(self, original_forward):
+        """Create a linearized forward function for LayerNorm/RMSNorm"""
+        def linearized_forward(self, input):
+            # Check if this is RMSNorm (no mean subtraction, no bias)
+            is_rmsnorm = not hasattr(self, 'bias')
             
-            if hasattr(layer, 'self_attn'):
-                attn_module = layer.self_attn
-                # Store original forward
-                self.original_forwards[f'layer_{layer_idx}'] = attn_module.forward
-                # Create patched forward
-                patched_forward = self._create_attention_monkey_patch(attn_module.forward)
-                # Apply monkey patch
-                attn_module.forward = patched_forward.__get__(attn_module, attn_module.__class__)
-        
-        print(f\"Monkey-patched {len(self.original_forwards)} attention modules\")
+            if is_rmsnorm:
+                # RMSNorm: only uses RMS, no mean subtraction
+                variance = input.pow(2).mean(-1, keepdim=True)
+                rms = torch.sqrt(variance + self.variance_epsilon).detach()
+                normalized = input / rms
+                return self.weight * normalized
+            else:
+                # Standard LayerNorm
+                mean = input.mean(-1, keepdim=True).detach()
+                var = input.var(-1, keepdim=True, unbiased=False).detach()
+                normalized = (input - mean) / torch.sqrt(var + self.variance_epsilon)
+                return self.weight * normalized + self.bias
+            
+        return linearized_forward
     
-    def register_layernorm_hooks(self):
-        """Register stop-gradient hooks on all LayerNorm modules"""
+    def linearize_all_layernorms(self):
+        """Monkey-patch all LayerNorm modules to use linearized forward"""
+        count = 0
+        
+        # Linearize LayerNorms in transformer layers
         for layer_idx in range(self.model.config.num_hidden_layers):
             layer = self.model.model.model.layers[layer_idx]
             
-            # Hook input LayerNorm (pre-attention)
+            # Linearize input LayerNorm (pre-attention)
             if hasattr(layer, 'input_layernorm'):
-                hook = layer.input_layernorm.register_forward_hook(self._stop_gradient_hook)
-                self.layernorm_hooks.append(hook)
+                ln = layer.input_layernorm
+                self.original_forwards[f'layer{layer_idx}_input'] = ln.forward
+                ln.forward = self._create_linearized_forward(ln.forward).__get__(ln, ln.__class__)
+                count += 1
             
-            # Hook post-attention LayerNorm (pre-MLP)
+            # Linearize post-attention LayerNorm (pre-MLP)
             if hasattr(layer, 'post_attention_layernorm'):
-                hook = layer.post_attention_layernorm.register_forward_hook(self._stop_gradient_hook)
-                self.layernorm_hooks.append(hook)
+                ln = layer.post_attention_layernorm
+                self.original_forwards[f'layer{layer_idx}_post'] = ln.forward
+                ln.forward = self._create_linearized_forward(ln.forward).__get__(ln, ln.__class__)
+                count += 1
         
-        # Hook final LayerNorm
+        # Linearize final LayerNorm
         if hasattr(self.model.model.model, 'norm'):
-            hook = self.model.model.model.norm.register_forward_hook(self._stop_gradient_hook)
-            self.layernorm_hooks.append(hook)
+            ln = self.model.model.model.norm
+            self.original_forwards['final_norm'] = ln.forward
+            ln.forward = self._create_linearized_forward(ln.forward).__get__(ln, ln.__class__)
+            count += 1
         
-        print(f"Registered {len(self.layernorm_hooks)} LayerNorm stop-gradient hooks")
+        print(f"Linearized {count} LayerNorm modules")
     
-    def register_attention_hooks(self):
-        """Register hooks to stop gradients through attention patterns"""
-        # Use monkey-patching instead of hooks for attention patterns
-        self._monkey_patch_attention_modules()
-    
-    def register_all_hooks(self):
-        """Register all stop-gradient hooks"""
-        self.register_layernorm_hooks()
-        self.register_attention_hooks()
-        self.hooks = self.layernorm_hooks + self.attention_hooks
-    
-    def remove_all_hooks(self):
-        """Remove all registered hooks and restore original functions"""
-        # Remove hooks
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks = []
-        self.layernorm_hooks = []
-        self.attention_hooks = []
+    def restore_original_forwards(self):
+        """Restore original LayerNorm forward methods"""
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            layer = self.model.model.model.layers[layer_idx]
+            
+            # Restore input LayerNorm
+            key = f'layer{layer_idx}_input'
+            if key in self.original_forwards and hasattr(layer, 'input_layernorm'):
+                layer.input_layernorm.forward = self.original_forwards[key]
+                
+            # Restore post-attention LayerNorm
+            key = f'layer{layer_idx}_post'
+            if key in self.original_forwards and hasattr(layer, 'post_attention_layernorm'):
+                layer.post_attention_layernorm.forward = self.original_forwards[key]
         
-        # Restore original attention forwards
-        if hasattr(self, 'original_forwards'):
-            for layer_idx in range(self.model.config.num_hidden_layers):
-                layer = self.model.model.model.layers[layer_idx]
-                if hasattr(layer, 'self_attn'):
-                    key = f'layer_{layer_idx}'
-                    if key in self.original_forwards:
-                        layer.self_attn.forward = self.original_forwards[key]
-            print(f"Restored {len(self.original_forwards)} original attention modules")
+        # Restore final LayerNorm
+        if 'final_norm' in self.original_forwards and hasattr(self.model.model.model, 'norm'):
+            self.model.model.model.norm.forward = self.original_forwards['final_norm']
+            
+        print(f"Restored {len(self.original_forwards)} original LayerNorm modules")
+        self.original_forwards = {}
 
 
 class LoRANeuronTracker:
@@ -326,19 +376,27 @@ print("="*80 + "\n")
 
 # %%
 # USER: HARDCODE YOUR TARGET POSITION HERE BASED ON THE PRINTED TOKENS ABOVE
-target_position = 431  # Use -1 for last token, or specify a position
+target_position = 194  # Use -1 for last token, or specify a position
 
 # %%
 # Compute attribution
 print("Computing LoRA neuron attributions...")
 
-# Setup stop-gradient hooks
-# This will freeze attention patterns and LayerNorm outputs during backward pass
-# - LayerNorm outputs are detached to stop gradients
-# - Attention patterns (softmax(QK^T/sqrt(d))) are detached in the attention computation
-print("Setting up stop-gradient hooks for LayerNorm and attention patterns...")
-stop_grad_hooks = StopGradientHooks(model)
-stop_grad_hooks.register_all_hooks()
+# Setup linearized LayerNorm
+# This linearizes LayerNorm by treating mean/variance as constants during backward pass
+# Each token's normalization is independent, so no cross-token gradients exist
+# This preserves gradient flow while making LayerNorm act as a simple linear scaling
+print("Linearizing LayerNorm modules...")
+layernorm_linearizer = LinearizedLayerNorm(model)
+layernorm_linearizer.linearize_all_layernorms()
+
+# Setup linearized attention
+# This treats attention patterns as constants during backward pass
+# Gradients flow through V but not through the softmax(QK^T) computation
+# This preserves OV circuit gradients while linearizing attention patterns
+print("Linearizing attention patterns...")
+attention_linearizer = AttentionLinearizer(model)
+attention_linearizer.linearize_all_attention_modules()
 
 # Setup tracker
 tracker = LoRANeuronTracker(model)
@@ -389,8 +447,8 @@ print("="*70)
 # - positive_token_id: The token you want the model to predict (target)
 # - negative_token_id: The token you want to contrast against (counterfactual)
 
-positive_token_id = 15277  # Set this to the token ID for positive logit
-negative_token_id = 13824  # Set this to the token ID for negative logit
+positive_token_id = 1988  # Set this to the token ID for positive logit
+negative_token_id = 2055  # Set this to the token ID for negative logit
 
 # If not specified, use top 2 tokens as default
 if positive_token_id is None:
@@ -411,30 +469,31 @@ print(f"Negative token: '{negative_token}' (id: {negative_token_id}, logit: {neg
 print(f"Logit difference: {positive_logit.item() - negative_logit.item():.3f}")
 
 # Compute logit difference as target metric
-target_metric = positive_logit - negative_logit
+# target_metric = positive_logit - negative_logit
+metric = positive_logit
 
 # %%
 # Compute gradients and attributions for ALL positions
 print("\nComputing gradients for all token positions...")
 all_attributions = []
 
-for name, activation in tqdm(tracker.activations.items(), desc="Computing attributions"):
-    # Compute gradient of logit difference w.r.t. this activation
-    grad = torch.autograd.grad(
-        outputs=target_metric,
-        inputs=activation,
-        retain_graph=True,
-        only_inputs=True
-    )[0]
+# One backward pass computes ALL gradients
+# model.zero_grad()
+target_metric.backward(retain_graph=True)
+
+# outputs = model(input_ids=input_ids)
+# logits = outputs.logits[0, target_position]
+# target_metric = positive_logit - negative_logit
+# target_metric.backward(retain_graph=True)
+
+# Then just access the stored gradients
+for name, activation in tracker.activations.items():
+    grad = activation.grad  # Already computed!
     
-    # Process each position up to and including target position
-    # (positions after target cannot influence it due to causal mask)
+    # Process as before...
     for pos in range(min(target_position + 1, activation.shape[1])):
-        # Extract scalar values at this position
         activation_value = activation[0, pos, 0].item()
         gradient_value = grad[0, pos, 0].item()
-        
-        # Attribution = gradient × activation
         attribution = gradient_value * activation_value
         
         # Store with position and token information
@@ -447,10 +506,6 @@ for name, activation in tqdm(tracker.activations.items(), desc="Computing attrib
             'activation': activation_value,
             'gradient': gradient_value
         })
-
-# Cleanup hooks
-tracker.remove_hooks()
-stop_grad_hooks.remove_all_hooks()
 
 print(f"Computed {len(all_attributions)} total attributions")
 
@@ -531,19 +586,6 @@ layer_means.sort(key=lambda x: x[1], reverse=True)
 for i, (layer, mean_attr) in enumerate(layer_means[:10]):
     print(f"{i+1:2d}. {layer}: {mean_attr:.6f}")
 
-# %%
-# Validation check: Are gradients flowing?
-zero_grad_count = sum(1 for entry in all_attributions if entry['gradient'] == 0.0)
-zero_activation_count = sum(1 for entry in all_attributions if entry['activation'] == 0.0)
-
-print(f"\nGradient Flow Validation:")
-print(f"Entries with zero gradient: {zero_grad_count}/{len(all_attributions)}")
-print(f"Entries with zero activation: {zero_activation_count}/{len(all_attributions)}")
-
-if zero_grad_count > len(all_attributions) * 0.5:
-    print("WARNING: Many entries have zero gradients. This might indicate a gradient flow issue.")
-else:
-    print("✓ Gradient flow appears healthy")
 
 # %%
 # Save detailed results
@@ -598,5 +640,3 @@ print(f"\nDetailed results saved to {results_file}")
 
 # %%
 print("\nAttribution study complete!")
-
- # %%
