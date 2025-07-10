@@ -24,6 +24,133 @@ lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
 
 # %%
+class StopGradientHooks:
+    """Manages stop-gradient hooks for LayerNorm and Attention patterns"""
+    
+    def __init__(self, model):
+        self.model = model
+        self.hooks = []
+        self.attention_hooks = []
+        self.layernorm_hooks = []
+        self.original_forwards = {}
+        
+    def _stop_gradient_hook(self, module, input, output):
+        """Hook that stops gradients through the output"""
+        # Detach the output to stop gradient flow
+        # But keep the computation graph intact for other paths
+        return output.detach()
+    
+    def _create_attention_monkey_patch(self, original_forward):
+        """Create a monkey-patched forward function that stops gradients through attention patterns"""
+        def patched_forward(*args, **kwargs):
+            # Get the original module (self in the forward context)
+            module = args[0]
+            
+            # Extract inputs
+            if len(args) > 1:
+                hidden_states = args[1]
+            else:
+                hidden_states = kwargs.get('hidden_states')
+            
+            # Call original forward to get all computations
+            # We need to handle output_attentions flag
+            original_output_attentions = kwargs.get('output_attentions', False)
+            kwargs['output_attentions'] = True  # Force attention weights output
+            
+            # Get full output with attention weights
+            outputs = original_forward(*args, **kwargs)
+            
+            # Process outputs based on structure
+            if isinstance(outputs, tuple):
+                attention_output = outputs[0]
+                attention_weights = outputs[1] if len(outputs) > 1 else None
+                
+                if attention_weights is not None:
+                    # Detach attention weights to stop gradients
+                    attention_weights = attention_weights.detach()
+                
+                # Reconstruct output based on original request
+                if original_output_attentions:
+                    return (attention_output, attention_weights) + outputs[2:]
+                else:
+                    # Don't include attention weights if not originally requested
+                    return (attention_output,) + outputs[2:]
+            
+            return outputs
+        
+        return patched_forward
+    
+    def _monkey_patch_attention_modules(self):
+        """Monkey-patch attention modules to stop gradients through attention patterns"""
+        self.original_forwards = {}
+        
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            layer = self.model.model.model.layers[layer_idx]
+            
+            if hasattr(layer, 'self_attn'):
+                attn_module = layer.self_attn
+                # Store original forward
+                self.original_forwards[f'layer_{layer_idx}'] = attn_module.forward
+                # Create patched forward
+                patched_forward = self._create_attention_monkey_patch(attn_module.forward)
+                # Apply monkey patch
+                attn_module.forward = patched_forward.__get__(attn_module, attn_module.__class__)
+        
+        print(f\"Monkey-patched {len(self.original_forwards)} attention modules\")
+    
+    def register_layernorm_hooks(self):
+        """Register stop-gradient hooks on all LayerNorm modules"""
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            layer = self.model.model.model.layers[layer_idx]
+            
+            # Hook input LayerNorm (pre-attention)
+            if hasattr(layer, 'input_layernorm'):
+                hook = layer.input_layernorm.register_forward_hook(self._stop_gradient_hook)
+                self.layernorm_hooks.append(hook)
+            
+            # Hook post-attention LayerNorm (pre-MLP)
+            if hasattr(layer, 'post_attention_layernorm'):
+                hook = layer.post_attention_layernorm.register_forward_hook(self._stop_gradient_hook)
+                self.layernorm_hooks.append(hook)
+        
+        # Hook final LayerNorm
+        if hasattr(self.model.model.model, 'norm'):
+            hook = self.model.model.model.norm.register_forward_hook(self._stop_gradient_hook)
+            self.layernorm_hooks.append(hook)
+        
+        print(f"Registered {len(self.layernorm_hooks)} LayerNorm stop-gradient hooks")
+    
+    def register_attention_hooks(self):
+        """Register hooks to stop gradients through attention patterns"""
+        # Use monkey-patching instead of hooks for attention patterns
+        self._monkey_patch_attention_modules()
+    
+    def register_all_hooks(self):
+        """Register all stop-gradient hooks"""
+        self.register_layernorm_hooks()
+        self.register_attention_hooks()
+        self.hooks = self.layernorm_hooks + self.attention_hooks
+    
+    def remove_all_hooks(self):
+        """Remove all registered hooks and restore original functions"""
+        # Remove hooks
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
+        self.layernorm_hooks = []
+        self.attention_hooks = []
+        
+        # Restore original attention forwards
+        if hasattr(self, 'original_forwards'):
+            for layer_idx in range(self.model.config.num_hidden_layers):
+                layer = self.model.model.model.layers[layer_idx]
+                if hasattr(layer, 'self_attn'):
+                    key = f'layer_{layer_idx}'
+                    if key in self.original_forwards:
+                        layer.self_attn.forward = self.original_forwards[key]
+            print(f"Restored {len(self.original_forwards)} original attention modules")
+
+
 class LoRANeuronTracker:
     """Tracks LoRA neuron activations during forward pass while preserving gradient flow"""
     
@@ -205,6 +332,14 @@ target_position = 431  # Use -1 for last token, or specify a position
 # Compute attribution
 print("Computing LoRA neuron attributions...")
 
+# Setup stop-gradient hooks
+# This will freeze attention patterns and LayerNorm outputs during backward pass
+# - LayerNorm outputs are detached to stop gradients
+# - Attention patterns (softmax(QK^T/sqrt(d))) are detached in the attention computation
+print("Setting up stop-gradient hooks for LayerNorm and attention patterns...")
+stop_grad_hooks = StopGradientHooks(model)
+stop_grad_hooks.register_all_hooks()
+
 # Setup tracker
 tracker = LoRANeuronTracker(model)
 tracker.register_hooks()
@@ -315,6 +450,7 @@ for name, activation in tqdm(tracker.activations.items(), desc="Computing attrib
 
 # Cleanup hooks
 tracker.remove_hooks()
+stop_grad_hooks.remove_all_hooks()
 
 print(f"Computed {len(all_attributions)} total attributions")
 
