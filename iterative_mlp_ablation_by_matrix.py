@@ -56,7 +56,7 @@ model = PeftModel.from_pretrained(model, lora_dir, torch_dtype=torch.bfloat16)
 # %%
 # Load multiple math problems
 dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
-n_prompts = 1
+n_prompts = 8
 problems = [dataset[i]['problem'] for i in range(n_prompts)]
 
 print(f"Loaded {n_prompts} problems")
@@ -264,43 +264,42 @@ else:
 # print(f"Successfully saved attention-ablated LoRA to: {attn_ablated_dir_path}")
 
 # %%
-# Step 2: Measure importance of each MLP layer
-print("\nStep 2: Measuring importance of each MLP layer...")
+# Step 2: Measure importance of each MLP matrix separately
+print("\nStep 2: Measuring importance of each MLP matrix separately...")
 mlp_matrices = ['gate_proj', 'up_proj', 'down_proj']
 n_layers = 64
 
-layer_importance = []
+matrix_importance = []
 
 for layer_idx in tqdm(range(n_layers), desc="Testing MLP layers"):
-    # Ablate this layer's MLP
-    layer_ablated = []
     for matrix_type in mlp_matrices:
+        # Ablate only this specific matrix in this layer
         modules = ablate_matrix_type_in_layer(model, layer_idx, matrix_type)
-        layer_ablated.extend(modules)
-    
-    if layer_ablated:  # Only if we found MLP modules in this layer
-        # Compute metrics with this layer ablated
-        metrics = compute_metrics(model, all_rollouts)
         
-        # Calculate increase in KL from baseline
-        kl_increase = metrics[KL_METRIC] - baseline_metrics[KL_METRIC]
-        
-        layer_importance.append({
-            'layer': layer_idx,
-            'kl_increase': kl_increase,
-            'max_kl': metrics['max_kl'],
-            'mean_kl': metrics['mean_kl']
-        })
-        
-        # Restore this layer
-        restore_modules(layer_ablated)
+        if modules:  # Only if we found this matrix type in this layer
+            # Compute metrics with this matrix ablated
+            metrics = compute_metrics(model, all_rollouts)
+            
+            # Calculate increase in KL from baseline
+            kl_increase = metrics[KL_METRIC] - baseline_metrics[KL_METRIC]
+            
+            matrix_importance.append({
+                'layer': layer_idx,
+                'matrix_type': matrix_type,
+                'kl_increase': kl_increase,
+                'max_kl': metrics['max_kl'],
+                'mean_kl': metrics['mean_kl']
+            })
+            
+            # Restore this matrix
+            restore_modules(modules)
 
 # Create dataframe and sort by importance
-df_importance = pd.DataFrame(layer_importance)
+df_importance = pd.DataFrame(matrix_importance)
 df_importance = df_importance.sort_values('kl_increase', ascending=not ABLATE_MOST_IMPORTANT_FIRST)
 
-print(f"\n{'Most' if ABLATE_MOST_IMPORTANT_FIRST else 'Least'} important MLP layers (by {KL_METRIC} increase):")
-print(df_importance.head(10))
+print(f"\n{'Most' if ABLATE_MOST_IMPORTANT_FIRST else 'Least'} important MLP matrices (by {KL_METRIC} increase):")
+print(df_importance.head(15))  # Show more since we have 3x as many entries
 
 # %%
 # Plot individual layer ablation impacts
@@ -310,31 +309,48 @@ fig, ax = plt.subplots(figsize=(14, 6))
 layer_numbers = list(range(n_layers))
 impacts = []
 
-# Map layer importance data to layer positions
-layer_to_impact = {row['layer']: row['kl_increase'] for _, row in df_importance.iterrows()}
+# Map matrix importance data to positions
+matrix_colors = {'gate_proj': 'steelblue', 'up_proj': 'forestgreen', 'down_proj': 'crimson'}
+bar_width = 0.25
 
-for layer in layer_numbers:
-    if layer in layer_to_impact:
-        impacts.append(layer_to_impact[layer])
-    else:
-        impacts.append(0)  # Should not happen if all layers were tested
+# Create separate lists for each matrix type
+gate_impacts = [0] * n_layers
+up_impacts = [0] * n_layers
+down_impacts = [0] * n_layers
 
-# Color based on impact magnitude
-colors = ['darkred' if impact > 0.01 else 'lightcoral' if impact > 0.001 else 'lightgray' 
-          for impact in impacts]
+for _, row in df_importance.iterrows():
+    layer = row['layer']
+    impact = row['kl_increase']
+    if row['matrix_type'] == 'gate_proj':
+        gate_impacts[layer] = impact
+    elif row['matrix_type'] == 'up_proj':
+        up_impacts[layer] = impact
+    elif row['matrix_type'] == 'down_proj':
+        down_impacts[layer] = impact
 
-# Create bar plot
-bars = ax.bar(layer_numbers, impacts, color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
+# Create grouped bar plot
+x = np.arange(n_layers)
+bars1 = ax.bar(x - bar_width, gate_impacts, bar_width, label='gate_proj', 
+                color=matrix_colors['gate_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
+bars2 = ax.bar(x, up_impacts, bar_width, label='up_proj',
+                color=matrix_colors['up_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
+bars3 = ax.bar(x + bar_width, down_impacts, bar_width, label='down_proj',
+                color=matrix_colors['down_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
 
-# Highlight high-impact layers with their values
-for layer, impact in enumerate(impacts):
-    if impact > 0.005:  # Only label significant impacts
-        ax.text(layer, impact + 0.0005, f'{impact:.3f}', ha='center', va='bottom', fontsize=7, rotation=90)
+# Highlight high-impact matrices with their values
+for layer in range(n_layers):
+    for offset, impacts, matrix_type in [(-bar_width, gate_impacts, 'gate_proj'), 
+                                         (0, up_impacts, 'up_proj'), 
+                                         (bar_width, down_impacts, 'down_proj')]:
+        if impacts[layer] > 0.005:  # Only label significant impacts
+            ax.text(layer + offset, impacts[layer] + 0.0005, f'{impacts[layer]:.3f}', 
+                    ha='center', va='bottom', fontsize=6, rotation=90)
 
 ax.set_xlabel('Layer Number', fontsize=12)
 ax.set_ylabel(f'{KL_METRIC.replace("_", " ").title()} Increase When Ablated', fontsize=12)
 attention_note = " (baseline: attention ablated)" if ABLATE_ATTENTION else " (baseline: no ablation)"
-ax.set_title(f'Individual MLP Layer Ablation Impact{attention_note}', fontsize=14)
+ax.set_title(f'Individual MLP Matrix Ablation Impact by Type{attention_note}', fontsize=14)
+ax.legend(loc='upper right')
 ax.set_xlim(-0.5, n_layers - 0.5)
 ax.grid(True, alpha=0.3, axis='y')
 
@@ -350,11 +366,16 @@ ax.text(40, section_y, 'Late-Mid', ha='center', fontsize=10, style='italic')
 ax.text(56, section_y, 'Late', ha='center', fontsize=10, style='italic')
 
 # Add statistics box
-mean_impact = df_importance['kl_increase'].mean()
-median_impact = df_importance['kl_increase'].median()
-max_impact = df_importance['kl_increase'].max()
-max_layer = df_importance.loc[df_importance['kl_increase'].idxmax(), 'layer']
-textstr = f'Mean impact: {mean_impact:.4f}\nMedian impact: {median_impact:.4f}\nMax impact: {max_impact:.4f} (L{max_layer})'
+# Calculate statistics per matrix type
+stats_text = []
+for matrix_type in mlp_matrices:
+    df_matrix = df_importance[df_importance['matrix_type'] == matrix_type]
+    mean_impact = df_matrix['kl_increase'].mean()
+    max_impact = df_matrix['kl_increase'].max()
+    if len(df_matrix) > 0:
+        max_layer = df_matrix.loc[df_matrix['kl_increase'].idxmax(), 'layer']
+        stats_text.append(f'{matrix_type}: mean={mean_impact:.4f}, max={max_impact:.4f} (L{max_layer})')
+textstr = '\n'.join(stats_text)
 props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
 ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
         verticalalignment='top', bbox=props)
@@ -363,8 +384,8 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Step 3: Iteratively ablate layers based on importance
-print(f"\nStep 3: Iteratively ablating {'most' if ABLATE_MOST_IMPORTANT_FIRST else 'least'} important MLP layers...")
+# Step 3: Iteratively ablate individual matrices based on importance
+print(f"\nStep 3: Iteratively ablating {'most' if ABLATE_MOST_IMPORTANT_FIRST else 'least'} important MLP matrices...")
 
 kl_threshold = 0
 
@@ -376,76 +397,90 @@ else:
 # Track ablation progress
 ablation_history = []
 permanently_ablated = []  # Keep track of ablated modules
-ablated_layers = set()  # Keep track of which layers are ablated
+ablated_matrices = set()  # Keep track of which (layer, matrix_type) pairs are ablated
 
 current_kl = baseline_metrics[KL_METRIC]
 iteration = 0
 
-# Get all non-ablated layers
-remaining_layer_indices = set(range(n_layers))
+# Get all possible matrix positions
+all_matrix_positions = [(layer, matrix_type) for layer in range(n_layers) for matrix_type in mlp_matrices]
+remaining_positions = set(all_matrix_positions)
 
-while (kl_threshold == 0 or current_kl < kl_threshold) and len(remaining_layer_indices) > len(ablated_layers):
-    print(f"\nIteration {iteration + 1}: Recomputing importance for {len(remaining_layer_indices) - len(ablated_layers)} remaining layers...")
+# Calculate total expected tests
+total_matrices = len(all_matrix_positions)
+if kl_threshold == 0:
+    # If no threshold, worst case is we test all matrices: n + (n-1) + (n-2) + ... + 1 = n(n+1)/2
+    max_expected_tests = total_matrices * (total_matrices + 1) // 2
+else:
+    # With threshold, estimate conservatively
+    max_expected_tests = min(total_matrices * 20, total_matrices * (total_matrices + 1) // 2)
+
+# Create overall progress bar
+overall_pbar = tqdm(total=max_expected_tests, desc="Overall ablation progress")
+tests_completed = 0
+
+while (kl_threshold == 0 or current_kl < kl_threshold) and len(ablated_matrices) < len(all_matrix_positions):
+    remaining_count = len(remaining_positions) - len(ablated_matrices)
+    print(f"\nIteration {iteration + 1}: Testing {remaining_count} remaining matrices...")
     
-    # Recompute importance for all remaining (non-ablated) layers
-    layer_importance_current = []
+    # Recompute importance for all remaining (non-ablated) matrices
+    matrix_importance_current = []
     
-    for layer_idx in tqdm(sorted(remaining_layer_indices - ablated_layers), desc="Testing remaining MLP layers"):
-        # Temporarily ablate this layer's MLP
-        layer_ablated = []
-        for matrix_type in mlp_matrices:
-            modules = ablate_matrix_type_in_layer(model, layer_idx, matrix_type)
-            layer_ablated.extend(modules)
+    for layer_idx, matrix_type in sorted(remaining_positions - ablated_matrices):
+        # Temporarily ablate this specific matrix
+        modules = ablate_matrix_type_in_layer(model, layer_idx, matrix_type)
         
-        if layer_ablated:  # Only if we found MLP modules in this layer
-            # Compute metrics with this layer ablated
+        if modules:  # Only if we found this matrix
+            # Compute metrics with this matrix ablated
             metrics = compute_metrics(model, all_rollouts)
             
             # Calculate increase in KL from current state
             kl_increase = metrics[KL_METRIC] - current_kl
             
-            layer_importance_current.append({
+            matrix_importance_current.append({
                 'layer': layer_idx,
+                'matrix_type': matrix_type,
                 'kl_increase': kl_increase,
                 'max_kl': metrics['max_kl'],
                 'mean_kl': metrics['mean_kl']
             })
             
-            # Restore this layer
-            restore_modules(layer_ablated)
+            # Restore this matrix
+            restore_modules(modules)
+        
+        tests_completed += 1
+        overall_pbar.update(1)
     
     # Sort by importance based on ablation strategy
-    layer_importance_current.sort(key=lambda x: x['kl_increase'], reverse=ABLATE_MOST_IMPORTANT_FIRST)
+    matrix_importance_current.sort(key=lambda x: x['kl_increase'], reverse=ABLATE_MOST_IMPORTANT_FIRST)
     
-    if not layer_importance_current:
-        print("No more layers to test")
+    if not matrix_importance_current:
+        print("No more matrices to test")
         break
     
-    # Get the next layer to ablate based on strategy
-    next_layer_info = layer_importance_current[0]
-    next_layer = next_layer_info['layer']
+    # Get the next matrix to ablate based on strategy
+    next_matrix_info = matrix_importance_current[0]
+    next_layer = next_matrix_info['layer']
+    next_matrix_type = next_matrix_info['matrix_type']
     
     importance_desc = "Most" if ABLATE_MOST_IMPORTANT_FIRST else "Least"
-    print(f"\n{importance_desc} important layer: {next_layer} (KL increase: {next_layer_info['kl_increase']:.4f})")
+    print(f"\n{importance_desc} important matrix: L{next_layer}.{next_matrix_type} (KL increase: {next_matrix_info['kl_increase']:.4f})")
     
-    # Ablate this layer's MLP permanently
-    print(f"Testing permanent ablation of layer {next_layer}")
+    # Ablate this specific matrix permanently
+    print(f"Testing permanent ablation of L{next_layer}.{next_matrix_type}")
     
-    temp_ablated = []
-    for matrix_type in mlp_matrices:
-        modules = ablate_matrix_type_in_layer(model, next_layer, matrix_type)
-        temp_ablated.extend(modules)
+    temp_ablated = ablate_matrix_type_in_layer(model, next_layer, next_matrix_type)
     
-    # Get the actual KL with this layer ablated
-    test_kl = next_layer_info[KL_METRIC]
+    # Get the actual KL with this matrix ablated
+    test_kl = next_matrix_info[KL_METRIC]
     
-    print(f"  {KL_METRIC} with layer {next_layer} ablated: {test_kl:.4f} (ratio: {test_kl / baseline_metrics[KL_METRIC]:.2f}x)")
+    print(f"  {KL_METRIC} with L{next_layer}.{next_matrix_type} ablated: {test_kl:.4f} (ratio: {test_kl / baseline_metrics[KL_METRIC]:.2f}x)")
     
     # Check if we should keep this ablation
     if kl_threshold == 0 or test_kl < kl_threshold:
         # Keep the ablation
-        print(f"  ✓ Keeping layer {next_layer} ablated (KL below threshold)")
-        ablated_layers.add(next_layer)
+        print(f"  ✓ Keeping L{next_layer}.{next_matrix_type} ablated (KL below threshold)")
+        ablated_matrices.add((next_layer, next_matrix_type))
         permanently_ablated.extend(temp_ablated)
         current_kl = test_kl
         
@@ -455,17 +490,18 @@ while (kl_threshold == 0 or current_kl < kl_threshold) and len(remaining_layer_i
         ablation_history.append({
             'iteration': iteration + 1,
             'layer_ablated': next_layer,
-            'n_layers_ablated': len(ablated_layers),
-            'mean_kl': next_layer_info['mean_kl'],
-            'max_kl': next_layer_info['max_kl'],
+            'matrix_ablated': next_matrix_type,
+            'n_matrices_ablated': len(ablated_matrices),
+            'mean_kl': next_matrix_info['mean_kl'],
+            'max_kl': next_matrix_info['max_kl'],
             'kl_ratio': current_kl / baseline_metrics[KL_METRIC],
-            'kl_increase': next_layer_info['kl_increase'],
+            'kl_increase': next_matrix_info['kl_increase'],
             'instantaneous_kl_increase': instantaneous_kl_increase,
             'kept_ablation': True
         })
     else:
-        # Restore this layer - KL exceeded threshold
-        print(f"  ✗ Restoring layer {next_layer} (KL exceeded threshold: {test_kl:.4f} > {kl_threshold:.4f})")
+        # Restore this matrix - KL exceeded threshold
+        print(f"  ✗ Restoring L{next_layer}.{next_matrix_type} (KL exceeded threshold: {test_kl:.4f} > {kl_threshold:.4f})")
         restore_modules(temp_ablated)
         
         # Calculate instantaneous KL increase (from previous state)
@@ -474,21 +510,26 @@ while (kl_threshold == 0 or current_kl < kl_threshold) and len(remaining_layer_i
         ablation_history.append({
             'iteration': iteration + 1,
             'layer_ablated': next_layer,
-            'n_layers_ablated': len(ablated_layers),
-            'mean_kl': next_layer_info['mean_kl'],
-            'max_kl': next_layer_info['max_kl'],
+            'matrix_ablated': next_matrix_type,
+            'n_matrices_ablated': len(ablated_matrices),
+            'mean_kl': next_matrix_info['mean_kl'],
+            'max_kl': next_matrix_info['max_kl'],
             'kl_ratio': test_kl / baseline_metrics[KL_METRIC],
-            'kl_increase': next_layer_info['kl_increase'],
+            'kl_increase': next_matrix_info['kl_increase'],
             'instantaneous_kl_increase': instantaneous_kl_increase,
             'kept_ablation': False
         })
         
         # Stop here - we've found the limit
-        print(f"\nStopping: Found the minimal set of {len(ablated_layers)} essential MLP layers")
+        print(f"\nStopping: Found the minimal set of {len(ablated_matrices)} essential MLP matrices")
+        overall_pbar.close()
         break
     
-    print(f"  Total layers ablated: {len(ablated_layers)}")
+    print(f"  Total matrices ablated: {len(ablated_matrices)}")
     iteration += 1
+
+# Close progress bar when done
+overall_pbar.close()
 
 # %%
 # Create results dataframe
@@ -496,8 +537,8 @@ df_history = pd.DataFrame(ablation_history)
 
 print(f"\nAblation stopped at iteration {len(ablation_history)}")
 print(f"Final {KL_METRIC}: {current_kl:.4f} ({current_kl / baseline_metrics[KL_METRIC]:.2f}x baseline)")
-print(f"Total MLP layers ablated: {len(ablated_layers)} out of {n_layers}")
-print(f"Percentage of MLP layers remaining: {(n_layers - len(ablated_layers)) / n_layers * 100:.1f}%")
+print(f"Total MLP matrices ablated: {len(ablated_matrices)} out of {len(all_matrix_positions)}")
+print(f"Percentage of MLP matrices remaining: {(len(all_matrix_positions) - len(ablated_matrices)) / len(all_matrix_positions) * 100:.1f}%")
 
 # %%
 # Plot ablation progress
@@ -525,15 +566,15 @@ if kl_threshold > 0:
 ax1.set_xlabel('Iteration')
 ax1.set_ylabel(f'{KL_METRIC.replace("_", " ").title()} Divergence')
 title_suffix = " (with attention ablated)" if ABLATE_ATTENTION else " (attention active)"
-ax1.set_title(f'Progressive MLP Layer Ablation{title_suffix}')
+ax1.set_title(f'Progressive MLP Matrix Ablation{title_suffix}')
 ax1.legend()
 ax1.grid(True, alpha=0.3)
 
 # Plot number of layers ablated
-ax2.plot(df_history['iteration'], df_history['n_layers_ablated'], 'orange', marker='s')
+ax2.plot(df_history['iteration'], df_history['n_matrices_ablated'], 'orange', marker='s')
 ax2.set_xlabel('Iteration')
-ax2.set_ylabel('Number of MLP Layers Ablated')
-ax2.set_title('Cumulative Layers Ablated')
+ax2.set_ylabel('Number of MLP Matrices Ablated')
+ax2.set_title('Cumulative Matrices Ablated')
 ax2.grid(True, alpha=0.3)
 
 # Plot instantaneous KL increase for each layer
@@ -541,14 +582,15 @@ ax3.bar(df_history['iteration'], df_history['instantaneous_kl_increase'],
         color=['green' if kept else 'red' for kept in df_history['kept_ablation']],
         alpha=0.7, edgecolor='black')
 
-# Add layer numbers on top of bars
+# Add matrix labels on top of bars
 for idx, row in df_history.iterrows():
+    label = f"L{row['layer_ablated']}.{row['matrix_ablated'][:1]}"
     ax3.text(row['iteration'], row['instantaneous_kl_increase'] + 0.001, 
-             str(row['layer_ablated']), ha='center', va='bottom', fontsize=8)
+             label, ha='center', va='bottom', fontsize=7, rotation=90)
 
 ax3.set_xlabel('Iteration')
 ax3.set_ylabel('Instantaneous KL Increase')
-ax3.set_title('Impact of Each Layer Ablation (Green=Kept, Red=Restored)')
+ax3.set_title('Impact of Each Matrix Ablation (Green=Kept, Red=Restored)')
 ax3.grid(True, alpha=0.3)
 ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
 
@@ -556,13 +598,20 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Show which layers were kept
-remaining_layers = sorted(set(range(n_layers)) - ablated_layers)
-print(f"\nRemaining MLP layers ({len(remaining_layers)} total):")
-print(remaining_layers)
+# Show which matrices were kept
+remaining_matrices = sorted(set(all_matrix_positions) - ablated_matrices)
+print(f"\nRemaining MLP matrices ({len(remaining_matrices)} total):")
+# Group by layer for cleaner display
+remaining_by_layer = {}
+for layer, matrix in remaining_matrices:
+    if layer not in remaining_by_layer:
+        remaining_by_layer[layer] = []
+    remaining_by_layer[layer].append(matrix)
+for layer in sorted(remaining_by_layer.keys()):
+    print(f"  Layer {layer}: {', '.join(remaining_by_layer[layer])}")
 
 # %%
-# Plot layers sorted by their impact
+# Plot matrices sorted by their impact
 fig, ax = plt.subplots(figsize=(12, 6))
 
 # Get only the kept ablations and sort by instantaneous KL increase
@@ -570,20 +619,30 @@ kept_ablations = df_history[df_history['kept_ablation']].copy()
 # Sort based on ablation strategy - if we ablated most important first, we want to show them in reverse order
 kept_ablations_sorted = kept_ablations.sort_values('instantaneous_kl_increase', ascending=not ABLATE_MOST_IMPORTANT_FIRST)
 
+# Color by matrix type
+matrix_colors = {'gate_proj': 'steelblue', 'up_proj': 'forestgreen', 'down_proj': 'crimson'}
+bar_colors = [matrix_colors[row['matrix_ablated']] for _, row in kept_ablations_sorted.iterrows()]
+
 # Create bar plot
 bars = ax.bar(range(len(kept_ablations_sorted)), 
                kept_ablations_sorted['instantaneous_kl_increase'],
-               color='steelblue', alpha=0.7, edgecolor='black')
+               color=bar_colors, alpha=0.7, edgecolor='black')
 
-# Add layer numbers on top of bars
+# Add matrix labels on top of bars
 for i, (idx, row) in enumerate(kept_ablations_sorted.iterrows()):
+    label = f"L{row['layer_ablated']}.{row['matrix_ablated'][:1]}"
     ax.text(i, row['instantaneous_kl_increase'] + 0.0005, 
-            f"L{row['layer_ablated']}", ha='center', va='bottom', fontsize=8, rotation=90)
+            label, ha='center', va='bottom', fontsize=7, rotation=90)
 
-ax.set_xlabel('Layers (sorted by impact)', fontsize=12)
+ax.set_xlabel('Matrices (sorted by impact)', fontsize=12)
 ax.set_ylabel('Instantaneous KL Increase', fontsize=12)
 sort_order = "Most to Least" if ABLATE_MOST_IMPORTANT_FIRST else "Least to Most"
-ax.set_title(f'MLP Layers Sorted by Impact When Ablated ({sort_order} Important)', fontsize=14)
+ax.set_title(f'MLP Matrices Sorted by Impact When Ablated ({sort_order} Important)', fontsize=14)
+
+# Add legend for matrix types
+from matplotlib.patches import Patch
+legend_elements = [Patch(facecolor=matrix_colors[mt], label=mt) for mt in mlp_matrices]
+ax.legend(handles=legend_elements, loc='upper right')
 ax.grid(True, alpha=0.3, axis='y')
 
 # Add a text box with statistics
@@ -598,39 +657,52 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Plot impact by layer number
+# Plot impact by layer number with matrix types
 fig, ax = plt.subplots(figsize=(14, 6))
 
-# Create a mapping of layer number to impact
-layer_to_impact = {}
+# Create mappings for each matrix type
+matrix_colors = {'gate_proj': 'steelblue', 'up_proj': 'forestgreen', 'down_proj': 'crimson'}
+bar_width = 0.25
+
+# Initialize impact arrays for each matrix type
+gate_impacts = [0] * n_layers
+up_impacts = [0] * n_layers
+down_impacts = [0] * n_layers
+
+# Fill impacts from kept ablations
 for _, row in df_history.iterrows():
     if row['kept_ablation']:
-        layer_to_impact[row['layer_ablated']] = row['instantaneous_kl_increase']
+        layer = row['layer_ablated']
+        impact = row['instantaneous_kl_increase']
+        if row['matrix_ablated'] == 'gate_proj':
+            gate_impacts[layer] = impact
+        elif row['matrix_ablated'] == 'up_proj':
+            up_impacts[layer] = impact
+        elif row['matrix_ablated'] == 'down_proj':
+            down_impacts[layer] = impact
 
-# Create arrays for plotting
-layer_numbers = list(range(n_layers))
-impacts = []
-colors_impact = []
-
-for layer in layer_numbers:
-    if layer in layer_to_impact:
-        impacts.append(layer_to_impact[layer])
-        colors_impact.append('darkred')
-    else:
-        impacts.append(0)  # Not ablated
-        colors_impact.append('lightgray')
-
-# Create bar plot
-bars = ax.bar(layer_numbers, impacts, color=colors_impact, alpha=0.7, edgecolor='black', linewidth=0.5)
+# Create grouped bar plot
+x = np.arange(n_layers)
+bars1 = ax.bar(x - bar_width, gate_impacts, bar_width, label='gate_proj',
+                color=matrix_colors['gate_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
+bars2 = ax.bar(x, up_impacts, bar_width, label='up_proj',
+                color=matrix_colors['up_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
+bars3 = ax.bar(x + bar_width, down_impacts, bar_width, label='down_proj',
+                color=matrix_colors['down_proj'], alpha=0.7, edgecolor='black', linewidth=0.5)
 
 # Highlight non-zero bars with their values
-for layer, impact in layer_to_impact.items():
-    if impact > 0.005:  # Only label significant impacts
-        ax.text(layer, impact + 0.0005, f'{impact:.3f}', ha='center', va='bottom', fontsize=7, rotation=90)
+for layer in range(n_layers):
+    for offset, impacts, matrix_type in [(-bar_width, gate_impacts, 'gate_proj'),
+                                         (0, up_impacts, 'up_proj'),
+                                         (bar_width, down_impacts, 'down_proj')]:
+        if impacts[layer] > 0.005:  # Only label significant impacts
+            ax.text(layer + offset, impacts[layer] + 0.0005, f'{impacts[layer]:.3f}',
+                    ha='center', va='bottom', fontsize=6, rotation=90)
 
 ax.set_xlabel('Layer Number', fontsize=12)
 ax.set_ylabel('Instantaneous KL Increase When Ablated', fontsize=12)
-ax.set_title('Impact of Ablating Each MLP Layer by Position in Model', fontsize=14)
+ax.set_title('Impact of Ablating Each MLP Matrix by Position in Model', fontsize=14)
+ax.legend(loc='upper left')
 ax.set_xlim(-0.5, n_layers - 0.5)
 ax.grid(True, alpha=0.3, axis='y')
 
@@ -646,9 +718,9 @@ ax.text(40, section_y, 'Late-Mid', ha='center', fontsize=10, style='italic')
 ax.text(56, section_y, 'Late', ha='center', fontsize=10, style='italic')
 
 # Add statistics box
-n_ablated = len(layer_to_impact)
-total_impact = sum(layer_to_impact.values())
-textstr = f'Layers ablated: {n_ablated}/{n_layers}\nTotal KL increase: {total_impact:.4f}'
+n_ablated = len(ablated_matrices)
+total_impact = sum(gate_impacts) + sum(up_impacts) + sum(down_impacts)
+textstr = f'Matrices ablated: {n_ablated}/{len(all_matrix_positions)}\nTotal KL increase: {total_impact:.4f}'
 props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
 ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
         verticalalignment='top', bbox=props)
@@ -657,93 +729,115 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Visualize which layers were ablated with ablation order
-fig, ax = plt.subplots(figsize=(14, 4))
+# Visualize which matrices were ablated with ablation order
+fig, ax = plt.subplots(figsize=(14, 6))
 
-# Create mapping of layer to ablation order
-layer_to_order = {}
+# Create mapping of (layer, matrix_type) to ablation order
+matrix_to_order = {}
 for idx, row in df_history.iterrows():
     if row['kept_ablation']:
-        layer_to_order[row['layer_ablated']] = idx + 1
+        matrix_to_order[(row['layer_ablated'], row['matrix_ablated'])] = idx + 1
 
-# Create colors based on ablation order
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
+# Matrix type positions and colors
+matrix_colors = {'gate_proj': 'steelblue', 'up_proj': 'forestgreen', 'down_proj': 'crimson'}
+matrix_positions = {'gate_proj': 0, 'up_proj': 1, 'down_proj': 2}
+bar_height = 0.8
 
-# Use a colormap for ablated layers - red to yellow
-cmap = cm.get_cmap('YlOrRd_r')  # Reversed so red is first, yellow is last
-norm = mcolors.Normalize(vmin=1, vmax=len(layer_to_order))
-
-colors = []
+# Create the visualization
 for layer in range(n_layers):
-    if layer in layer_to_order:
-        # Color based on ablation order
-        order = layer_to_order[layer]
-        colors.append(cmap(norm(order)))
-    else:
-        # Active layer - light green
-        colors.append('lightgreen')
+    for matrix_type in mlp_matrices:
+        y_pos = layer * 3 + matrix_positions[matrix_type]
+        
+        if (layer, matrix_type) in matrix_to_order:
+            # Ablated matrix - use darker version of the color
+            color = matrix_colors[matrix_type]
+            order = matrix_to_order[(layer, matrix_type)]
+            ax.barh(y_pos, 1, bar_height, color=color, alpha=0.8, edgecolor='black', linewidth=1)
+            # Add order number
+            ax.text(0.5, y_pos, str(order), ha='center', va='center', fontsize=6,
+                    color='white', fontweight='bold')
+        else:
+            # Active matrix - light gray
+            ax.barh(y_pos, 1, bar_height, color='lightgray', alpha=0.3, edgecolor='black', linewidth=0.5)
 
-# Plot bars
-bars = ax.bar(range(n_layers), np.ones(n_layers), color=colors, edgecolor='black', linewidth=0.5)
+ax.set_xlim(0, 1)
+ax.set_ylim(-0.5, n_layers * 3 - 0.5)
+ax.set_xlabel('')
+ax.set_xticks([])
 
-# Add ablation order numbers for ablated layers
-for layer, order in layer_to_order.items():
-    ax.text(layer, 0.5, str(order), ha='center', va='center', fontsize=7, 
-            color='white', fontweight='bold')
+# Set y-axis labels
+y_labels = []
+y_positions = []
+for layer in range(n_layers):
+    if layer % 4 == 0:  # Show every 4th layer
+        y_labels.append(f'L{layer}')
+        y_positions.append(layer * 3 + 1)
 
-ax.set_xlabel('Layer Index', fontsize=12)
-ax.set_ylabel('')
+ax.set_yticks(y_positions)
+ax.set_yticklabels(y_labels)
+ax.set_ylabel('Layer', fontsize=12)
+
+# Add matrix type labels
+for i, (matrix_type, color) in enumerate(matrix_colors.items()):
+    ax.text(1.02, i, matrix_type, transform=ax.transData, fontsize=10,
+            color=color, fontweight='bold', va='center')
+
 attention_note = " (attention ablated)" if ABLATE_ATTENTION else " (attention active)"
-ax.set_title(f'MLP Layer Ablation Order ({len(ablated_layers)} ablated, {len(remaining_layers)} remaining){attention_note}', fontsize=14)
-ax.set_ylim(0, 1.3)
-ax.set_xlim(-0.5, n_layers - 0.5)
-ax.set_yticks([])
+ax.set_title(f'MLP Matrix Ablation Order ({len(ablated_matrices)} ablated, {len(remaining_matrices)} remaining){attention_note}', fontsize=14)
 
-# Add colorbar
-sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-sm.set_array([])
-cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.1, shrink=0.5)
-cbar.set_label('Ablation Order (1 = first ablated)', fontsize=10)
-
-# Add legend for active layers
+# Add legend
 from matplotlib.patches import Patch
 legend_elements = [
-    Patch(facecolor='lightgreen', edgecolor='black', label='Active MLP layer')
+    Patch(facecolor='lightgray', alpha=0.3, edgecolor='black', label='Active matrix'),
+    Patch(facecolor='gray', edgecolor='black', label='Ablated matrix (number shows order)')
 ]
-ax.legend(handles=legend_elements, loc='upper right')
+ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
 
-# Add text summary
-ax.text(n_layers/2, 1.15, f'Total ablated: {len(ablated_layers)} ({len(ablated_layers)/n_layers*100:.1f}%)', 
-        ha='center', fontsize=10)
+# Add statistics for each matrix type
+stats_y_start = n_layers * 3 + 2
+for i, matrix_type in enumerate(mlp_matrices):
+    count = sum(1 for (l, m) in ablated_matrices if m == matrix_type)
+    total = n_layers
+    ax.text(0.5, stats_y_start + i, f'{matrix_type}: {count}/{total} ablated',
+            transform=ax.transData, fontsize=9, ha='center')
 
 plt.tight_layout()
 plt.show()
 
 # %%
-# Show distribution of ablated layers across model depth
+# Show distribution of ablated matrices across model depth
 fig, ax = plt.subplots(figsize=(10, 4))
 
 # Divide layers into quarters
 quarters = ['Early (0-15)', 'Early-Mid (16-31)', 'Late-Mid (32-47)', 'Late (48-63)']
-quarter_counts = [0, 0, 0, 0]
+quarter_counts = {mt: [0, 0, 0, 0] for mt in mlp_matrices}
 
-for layer in ablated_layers:
+for layer, matrix_type in ablated_matrices:
     quarter_idx = layer // 16
-    quarter_counts[quarter_idx] += 1
+    quarter_counts[matrix_type][quarter_idx] += 1
 
-# Plot bar chart
-bars = ax.bar(quarters, quarter_counts, color=['#ff9999', '#ffcc99', '#99ccff', '#cc99ff'])
+# Create grouped bar chart
+bar_width = 0.25
+x = np.arange(len(quarters))
 
-# Add value labels
-for bar in bars:
-    height = bar.get_height()
-    ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-            f'{int(height)}', ha='center', va='bottom')
+for i, (matrix_type, color) in enumerate(matrix_colors.items()):
+    counts = quarter_counts[matrix_type]
+    bars = ax.bar(x + i * bar_width - bar_width, counts, bar_width,
+                   label=matrix_type, color=color, alpha=0.7)
+    
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        if height > 0:
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                    f'{int(height)}', ha='center', va='bottom', fontsize=8)
 
-ax.set_ylabel('Number of Ablated Layers', fontsize=12)
-ax.set_title('Distribution of Ablated MLP Layers Across Model Depth', fontsize=14)
-ax.set_ylim(0, max(quarter_counts) + 2)
+ax.set_xlabel('Model Section', fontsize=12)
+ax.set_ylabel('Number of Ablated Matrices', fontsize=12)
+ax.set_title('Distribution of Ablated MLP Matrices Across Model Depth', fontsize=14)
+ax.set_xticks(x)
+ax.set_xticklabels(quarters)
+ax.legend()
 ax.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
@@ -782,8 +876,12 @@ print("\n" + "="*80)
 print("PROBLEM:")
 print(problem[:300] + "..." if len(problem) > 300 else problem)
 print("\n" + "="*80)
+# Count remaining matrices by type
+remaining_by_type = {'gate_proj': 0, 'up_proj': 0, 'down_proj': 0}
+for _, matrix_type in remaining_matrices:
+    remaining_by_type[matrix_type] += 1
 attention_status = "no attention" if ABLATE_ATTENTION else "with attention"
-print(f"OUTPUT WITH MINIMAL MLP LAYERS ({len(remaining_layers)} layers, {attention_status}):")
+print(f"OUTPUT WITH MINIMAL MLP MATRICES ({len(remaining_matrices)} matrices - G:{remaining_by_type['gate_proj']}, U:{remaining_by_type['up_proj']}, D:{remaining_by_type['down_proj']}, {attention_status}):")
 for line in minimal_text.split('\n')[:15]:
     print(textwrap.fill(line, width=80) if line else '')
 

@@ -15,11 +15,12 @@ from IPython.display import HTML, display
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/workspace/models/ckpts_1.1"
+lora_path = "/workspace/s1_peft/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
-lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*")
+# lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*/checkpoint-100")
+lora_dirs = glob.glob("/workspace/s1_peft/ckpts_1.1/s1-lora-32B-r1-mlp_only-10samples-20250706_060547")
 lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
 

@@ -470,7 +470,7 @@ print(f"Logit difference: {positive_logit.item() - negative_logit.item():.3f}")
 
 # Compute logit difference as target metric
 # target_metric = positive_logit - negative_logit
-metric = positive_logit
+target_metric = positive_logit
 
 # %%
 # Compute gradients and attributions for ALL positions
@@ -640,3 +640,5 @@ print(f"\nDetailed results saved to {results_file}")
 
 # %%
 print("\nAttribution study complete!")
+
+# %%
