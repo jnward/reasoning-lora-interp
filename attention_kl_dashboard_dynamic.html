@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attention KL Divergence Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .sidebar {
+            width: 350px;
+            background-color: white;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+        .main-content {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        .controls {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .token-display {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .token {
+            display: inline-block;
+            padding: 2px 1px;
+            margin: 0;
+            border-radius: 2px;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 13px;
+            cursor: pointer;
+            position: relative;
+            white-space: pre;
+            line-height: 1.5;
+        }
+        .token-tooltip {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            z-index: 1000;
+        }
+        .token:hover .token-tooltip {
+            opacity: 1;
+        }
+        .token-line {
+            display: block;
+            margin: 0;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            line-height: 1.5;
+            min-height: 1.5em;
+        }
+        .head-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .head-item {
+            padding: 10px;
+            margin: 5px 0;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .head-item:hover {
+            background-color: #e9ecef;
+        }
+        .head-item.selected {
+            background-color: #007bff;
+            color: white;
+        }
+        select, input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: 500;
+        }
+        h1, h2, h3 {
+            margin-top: 0;
+        }
+        .metric-display {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .colorbar {
+            height: 20px;
+            background: linear-gradient(to right, #f0f0f0 0%, #ffffcc 25%, #ffeda0 50%, #feb24c 75%, #f03b20 100%);
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .special-token {
+            border: 2px solid #6c757d;
+        }
+        .attention-mode {
+            background-color: #e7f0ff;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+        .hover-legend {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 15px;
+            border-radius: 3px;
+            border: 1px solid #ddd;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            background-color: #fee;
+            color: #c33;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <h2>Top Attention Heads</h2>
+            <div style="margin-bottom: 10px;">
+                <label>
+                    <input type="radio" name="sort-metric" value="avg" checked> Sort by Average KL
+                </label>
+                <label>
+                    <input type="radio" name="sort-metric" value="max"> Sort by Max KL
+                </label>
+            </div>
+            <div class="head-list" id="head-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    Loading head statistics...
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <h1>Attention KL Divergence Analysis</h1>
+            
+            <div class="controls">
+                <h3>Controls</h3>
+                <label>View Mode:</label>
+                <select id="view-mode">
+                    <option value="head">Specific Head</option>
+                    <option value="layer">Layer Average</option>
+                    <option value="overall">Overall Average</option>
+                </select>
+                
+                <div id="head-controls">
+                    <label>Layer:</label>
+                    <select id="layer-select"></select>
+                    
+                    <label>Head:</label>
+                    <select id="head-select"></select>
+                </div>
+                
+                <div id="layer-controls" style="display: none;">
+                    <label>Layer:</label>
+                    <select id="layer-select-avg"></select>
+                </div>
+                
+                <div class="metric-display">
+                    <div id="current-selection">Loading metadata...</div>
+                </div>
+                
+                <label>KL Divergence Scale (Max Value):</label>
+                <input type="range" id="kl-scale" min="0.1" max="10" step="0.1" value="1">
+                <span id="kl-scale-value">1.0</span>
+            </div>
+            
+            <div class="token-display">
+                <h3>Token-wise KL Divergence</h3>
+                <div class="colorbar"></div>
+                <div>
+                    <small style="float: left;">Low KL</small>
+                    <small style="float: right;">High KL</small>
+                    <div style="clear: both;"></div>
+                </div>
+                <div class="attention-mode" id="attention-mode">
+                    <div id="hover-info" style="visibility: hidden;">
+                        <strong>Hover Mode:</strong> Showing attention patterns for position <span id="hover-position">-</span>
+                    </div>
+                    <div class="hover-legend">
+                        <small style="color: #666;">Hover over tokens to see attention patterns:</small>
+                        <div style="display: flex; gap: 20px; margin-top: 5px;">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: #00ffff;"></div>
+                                <span>Base Model</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: #ff00ff;"></div>
+                                <span>LoRA Model</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: #0000ff;"></div>
+                                <span>Both Models</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="tokens-container">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading tokens...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const DATA_BASE_PATH = 'attention_kl_data';
+        
+        // Global state
+        let metadata = null;
+        let currentData = null;
+        let loadedDataCache = {};
+        
+        let currentLayer = 0;
+        let currentHead = 0;
+        let currentViewMode = 'head';
+        let sortMetric = 'avg';
+        let hoverPosition = null;
+        let isHovering = false;
+        let klScaleMax = 1.0;
+        
+        // Load JSON data
+        async function loadJSON(path) {
+            try {
+                const response = await fetch(path);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status} for ${path}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error(`Error loading ${path}:`, error);
+                throw error;
+            }
+        }
+        
+        // Load metadata on page load
+        async function loadMetadata() {
+            try {
+                metadata = await loadJSON(`${DATA_BASE_PATH}/metadata.json`);
+                console.log('Metadata loaded:', metadata);
+                
+                // Initialize controls with metadata
+                initializeControls();
+                updateHeadList();
+                
+                // Load initial data
+                await loadCurrentData();
+            } catch (error) {
+                showError('Failed to load metadata. Make sure the data files are in the correct location.');
+            }
+        }
+        
+        // Load data for current selection
+        async function loadCurrentData() {
+            const cacheKey = `${currentViewMode}_${currentLayer}_${currentHead}`;
+            
+            // Check cache first
+            if (loadedDataCache[cacheKey]) {
+                currentData = loadedDataCache[cacheKey];
+                updateDisplay();
+                return;
+            }
+            
+            // Show loading state
+            document.getElementById('tokens-container').innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    Loading data...
+                </div>
+            `;
+            
+            try {
+                let dataPath;
+                if (currentViewMode === 'head') {
+                    dataPath = `${DATA_BASE_PATH}/heads/${currentLayer}_${currentHead}.json`;
+                } else if (currentViewMode === 'layer') {
+                    dataPath = `${DATA_BASE_PATH}/layer_avg/${currentLayer}.json`;
+                } else {
+                    dataPath = `${DATA_BASE_PATH}/overall.json`;
+                }
+                
+                const data = await loadJSON(dataPath);
+                loadedDataCache[cacheKey] = data;
+                currentData = data;
+                
+                // Auto-adjust scale to data range if it's the first load
+                if (Object.keys(loadedDataCache).length === 1) {
+                    const maxDataKL = Math.max(...data.kl_divergences);
+                    // Round up to nearest 0.5
+                    klScaleMax = Math.ceil(maxDataKL * 2) / 2;
+                    document.getElementById('kl-scale').value = klScaleMax;
+                    document.getElementById('kl-scale-value').textContent = klScaleMax.toFixed(1);
+                }
+                
+                updateDisplay();
+            } catch (error) {
+                console.error('Load error details:', error);
+                showError(`Failed to load data for ${cacheKey}: ${error.message}`);
+            }
+        }
+        
+        // Show error message
+        function showError(message) {
+            document.getElementById('tokens-container').innerHTML = `
+                <div class="error">${message}</div>
+            `;
+        }
+        
+        // Initialize controls
+        function initializeControls() {
+            if (!metadata) return;
+            
+            // Layer select
+            const layerSelect = document.getElementById('layer-select');
+            const layerSelectAvg = document.getElementById('layer-select-avg');
+            layerSelect.innerHTML = '';
+            layerSelectAvg.innerHTML = '';
+            
+            for (let i = 0; i < metadata.n_layers; i++) {
+                const option = new Option(`Layer ${i}`, i);
+                layerSelect.add(option.cloneNode(true));
+                layerSelectAvg.add(option);
+            }
+            
+            // Head select
+            const headSelect = document.getElementById('head-select');
+            headSelect.innerHTML = '';
+            for (let i = 0; i < metadata.n_heads; i++) {
+                headSelect.add(new Option(`Head ${i}`, i));
+            }
+            
+            // Event listeners
+            document.getElementById('view-mode').addEventListener('change', updateViewMode);
+            layerSelect.addEventListener('change', (e) => {
+                currentLayer = parseInt(e.target.value);
+                loadCurrentData();
+            });
+            layerSelectAvg.addEventListener('change', (e) => {
+                currentLayer = parseInt(e.target.value);
+                loadCurrentData();
+            });
+            headSelect.addEventListener('change', (e) => {
+                currentHead = parseInt(e.target.value);
+                loadCurrentData();
+            });
+            
+            document.querySelectorAll('input[name="sort-metric"]').forEach(radio => {
+                radio.addEventListener('change', (e) => {
+                    sortMetric = e.target.value;
+                    updateHeadList();
+                });
+            });
+            
+            // KL scale slider
+            const klScaleSlider = document.getElementById('kl-scale');
+            const klScaleValue = document.getElementById('kl-scale-value');
+            klScaleSlider.addEventListener('input', (e) => {
+                klScaleMax = parseFloat(e.target.value);
+                klScaleValue.textContent = klScaleMax.toFixed(1);
+                // Always update display when scale changes
+                updateDisplay();
+            });
+        }
+        
+        function updateViewMode() {
+            currentViewMode = document.getElementById('view-mode').value;
+            document.getElementById('head-controls').style.display = 
+                currentViewMode === 'head' ? 'block' : 'none';
+            document.getElementById('layer-controls').style.display = 
+                currentViewMode === 'layer' ? 'block' : 'none';
+            loadCurrentData();
+        }
+        
+        function updateDisplay() {
+            if (!metadata || !currentData) return;
+            
+            const klValues = currentData.kl_divergences;
+            // Use the scale slider for max, always use 0 for min
+            const maxKL = klScaleMax;
+            const minKL = 0;
+            
+            // Update current selection display
+            let selectionText = '';
+            if (currentViewMode === 'head') {
+                selectionText = `Layer ${currentLayer}, Head ${currentHead}`;
+                const stats = metadata.head_stats.find(h => h.layer === currentLayer && h.head === currentHead);
+                if (stats) {
+                    selectionText += ` - Avg KL: ${stats.avg_kl.toFixed(4)}, Max KL: ${stats.max_kl.toFixed(4)}`;
+                }
+            } else if (currentViewMode === 'layer') {
+                selectionText = `Layer ${currentLayer} (averaged across heads)`;
+            } else {
+                selectionText = 'Overall (averaged across all layers and heads)';
+            }
+            document.getElementById('current-selection').textContent = selectionText;
+            
+            // Update tokens display
+            const container = document.getElementById('tokens-container');
+            container.innerHTML = '';
+            
+            // Group tokens by lines
+            let currentLine = document.createElement('div');
+            currentLine.className = 'token-line';
+            container.appendChild(currentLine);
+            
+            metadata.tokens.forEach((token, idx) => {
+                const tokenSpan = createTokenElement(token, idx, klValues[idx], minKL, maxKL);
+                currentLine.appendChild(tokenSpan);
+                
+                // Count newlines in the token and create that many new lines
+                const newlineCount = (token.match(/\n/g) || []).length;
+                if (newlineCount > 0) {
+                    for (let i = 0; i < newlineCount; i++) {
+                        currentLine = document.createElement('div');
+                        currentLine.className = 'token-line';
+                        if (i < newlineCount - 1) {
+                            currentLine.innerHTML = '&nbsp;';
+                        }
+                        container.appendChild(currentLine);
+                    }
+                }
+            });
+        }
+        
+        function createTokenElement(token, idx, kl, minKL, maxKL) {
+            const tokenSpan = document.createElement('span');
+            tokenSpan.className = 'token';
+            
+            // Special tokens
+            if (token.includes('<|im_start|>') || token.includes('<|im_end|>')) {
+                tokenSpan.classList.add('special-token');
+            }
+            
+            // Color based on KL divergence
+            const normalizedKL = Math.max(0, Math.min(1, (kl - minKL) / (maxKL - minKL + 1e-10)));
+            const color = getColorForValue(normalizedKL);
+            tokenSpan.style.backgroundColor = color;
+            
+            // Set text color based on background
+            const brightness = getBrightness(color);
+            const textColor = brightness > 128 ? '#000' : '#fff';
+            
+            // Token text - escape HTML and show newlines as return symbol
+            let tokenDisplay = token
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;')
+                .replace(/ /g, '&nbsp;')
+                .replace(/\n/g, '↵');
+            
+            // Wrap entire content with color, then make return symbols gray
+            tokenDisplay = '<span style="color: ' + textColor + ';">' + tokenDisplay + '</span>';
+            tokenDisplay = tokenDisplay.replace(/↵/g, '</span><span style="color: #888;">↵</span><span style="color: ' + textColor + ';">');
+            
+            // Clean up any empty spans
+            tokenDisplay = tokenDisplay.replace(/<span style="color: [^"]+;"><\/span>/g, '');
+            
+            tokenSpan.innerHTML = tokenDisplay;
+            
+            // Tooltip
+            const tooltip = document.createElement('div');
+            tooltip.className = 'token-tooltip';
+            tooltip.textContent = `Pos: ${idx}, KL: ${kl.toFixed(4)}`;
+            tokenSpan.appendChild(tooltip);
+            
+            // Hover events for attention patterns
+            if (metadata.has_attention_patterns) {
+                tokenSpan.addEventListener('mouseenter', () => {
+                    showAttentionPatterns(idx);
+                });
+                
+                tokenSpan.addEventListener('mouseleave', () => {
+                    hideAttentionPatterns();
+                });
+            }
+            
+            return tokenSpan;
+        }
+        
+        function getColorForValue(value) {
+            // Color scale from light gray to red
+            const colors = [
+                [240, 240, 240],  // Very light gray
+                [255, 255, 204],  // Light yellow
+                [255, 237, 160],  // Yellow
+                [254, 178, 76],   // Orange
+                [240, 59, 32]     // Red
+            ];
+            
+            const scaledValue = value * (colors.length - 1);
+            const lowerIdx = Math.floor(scaledValue);
+            const upperIdx = Math.ceil(scaledValue);
+            const fraction = scaledValue - lowerIdx;
+            
+            const lowerColor = colors[Math.max(0, Math.min(lowerIdx, colors.length - 1))];
+            const upperColor = colors[Math.max(0, Math.min(upperIdx, colors.length - 1))];
+            
+            const r = Math.round(lowerColor[0] + (upperColor[0] - lowerColor[0]) * fraction);
+            const g = Math.round(lowerColor[1] + (upperColor[1] - lowerColor[1]) * fraction);
+            const b = Math.round(lowerColor[2] + (upperColor[2] - lowerColor[2]) * fraction);
+            
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+        
+        function getBrightness(color) {
+            const rgb = color.match(/\d+/g);
+            return (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
+        }
+        
+        // Attention pattern visualization functions
+        function getAttentionValue(position, targetPosition, modelType) {
+            if (!currentData || !currentData.attention_patterns) return 0;
+            
+            const patterns = currentData.attention_patterns[modelType];
+            // Convert position to string since JSON keys are strings
+            const posKey = String(position);
+            if (!patterns || !patterns[posKey]) return 0;
+            
+            // Find the target position in the sparse representation
+            const sparseData = patterns[posKey];
+            for (const pair of sparseData) {
+                const idx = pair[0];
+                const value = pair[1];
+                if (idx === targetPosition) {
+                    return value;
+                }
+            }
+            return 0;
+        }
+        
+        function getAttentionColor(baseValue, loraValue) {
+            // Simple color mapping:
+            // B is always 255 (full blue)
+            // R is (255 - base_intensity * 255) 
+            // G is (255 - lora_intensity * 255)
+            
+            // Scale factor to make colors more visible
+            const scale = 3.0;
+            
+            // Calculate scaled values (0-1)
+            const baseIntensity = Math.min(1, baseValue * scale);
+            const loraIntensity = Math.min(1, loraValue * scale);
+            
+            // Calculate RGB values
+            const r = Math.round(255 - baseIntensity * 255);
+            const g = Math.round(255 - loraIntensity * 255);
+            const b = 255;
+            
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+        
+        function blendWithWhite(color, intensity) {
+            const white = [255, 255, 255];
+            const r = Math.round(white[0] + (color[0] - white[0]) * intensity);
+            const g = Math.round(white[1] + (color[1] - white[1]) * intensity);
+            const b = Math.round(white[2] + (color[2] - white[2]) * intensity);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+        
+        function showAttentionPatterns(position) {
+            if (!currentData || !currentData.attention_patterns) return;
+            
+            hoverPosition = position;
+            isHovering = true;
+            
+            // Debug: Check if we have attention patterns
+            console.log('Hovering on position:', position);
+            console.log('Has attention patterns:', !!currentData.attention_patterns);
+            
+            // Update hover info display
+            document.getElementById('hover-position').textContent = position;
+            document.getElementById('hover-info').style.visibility = 'visible';
+            
+            // Update all token colors based on attention from the hovered position
+            const tokenSpans = document.querySelectorAll('.token');
+            tokenSpans.forEach((span, idx) => {
+                if (idx <= position) {  // Only show attention to previous positions
+                    const baseAttn = getAttentionValue(position, idx, 'base');
+                    const loraAttn = getAttentionValue(position, idx, 'lora');
+                    
+                    // Debug first few tokens
+                    if (idx < 3 && position === 10) {
+                        console.log(`Token ${idx}: base=${baseAttn}, lora=${loraAttn}`);
+                    }
+                    
+                    const color = getAttentionColor(baseAttn, loraAttn);
+                    span.style.backgroundColor = color;
+                    
+                    // Update text color based on new background
+                    const brightness = getBrightness(color);
+                    const textColor = brightness > 128 ? '#000' : '#fff';
+                    
+                    // Re-apply text coloring with return symbols
+                    const token = metadata.tokens[idx];
+                    let tokenDisplay = token
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;')
+                        .replace(/ /g, '&nbsp;')
+                        .replace(/\n/g, '↵');
+                    
+                    tokenDisplay = '<span style="color: ' + textColor + ';">' + tokenDisplay + '</span>';
+                    tokenDisplay = tokenDisplay.replace(/↵/g, '</span><span style="color: #888;">↵</span><span style="color: ' + textColor + ';">');
+                    tokenDisplay = tokenDisplay.replace(/<span style="color: [^"]+;"><\/span>/g, '');
+                    
+                    // Update the token content without recreating the tooltip
+                    const tooltip = span.querySelector('.token-tooltip');
+                    span.innerHTML = tokenDisplay;
+                    if (tooltip) {
+                        span.appendChild(tooltip);
+                    }
+                }
+            });
+        }
+        
+        function hideAttentionPatterns() {
+            if (!isHovering) return;
+            
+            hoverPosition = null;
+            isHovering = false;
+            
+            // Hide hover info
+            document.getElementById('hover-info').style.visibility = 'hidden';
+            
+            // Restore KL divergence colors
+            updateDisplay();
+        }
+        
+        function updateHeadList() {
+            if (!metadata) return;
+            
+            const container = document.getElementById('head-list');
+            container.innerHTML = '';
+            
+            // Sort heads
+            const sortedHeads = [...metadata.head_stats].sort((a, b) => {
+                return sortMetric === 'avg' ? b.avg_kl - a.avg_kl : b.max_kl - a.max_kl;
+            });
+            
+            // Display top heads
+            sortedHeads.slice(0, 50).forEach((stat, idx) => {
+                const item = document.createElement('div');
+                item.className = 'head-item';
+                if (stat.layer === currentLayer && stat.head === currentHead && currentViewMode === 'head') {
+                    item.classList.add('selected');
+                }
+                
+                item.innerHTML = `
+                    <strong>${idx + 1}. L${stat.layer}-H${stat.head}</strong><br>
+                    Avg KL: ${stat.avg_kl.toFixed(4)}, Max KL: ${stat.max_kl.toFixed(4)}
+                `;
+                
+                item.addEventListener('click', () => {
+                    currentLayer = stat.layer;
+                    currentHead = stat.head;
+                    document.getElementById('view-mode').value = 'head';
+                    document.getElementById('layer-select').value = stat.layer;
+                    document.getElementById('head-select').value = stat.head;
+                    updateViewMode();
+                    updateHeadList();
+                });
+                
+                container.appendChild(item);
+            });
+        }
+        
+        // Initialize on page load
+        loadMetadata();
+    </script>
+</body>
+</html>

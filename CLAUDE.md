@@ -18,6 +18,7 @@ This project investigates the interpretability of rank-1 LoRA (Low-Rank Adaptati
 1. **LoRA Direction Interpretability**: LoRA directions tend to be interpretable through analysis of max-activating examples
 2. **Steering Capability**: Steering with LoRA directions shows some promise but needs more investigation
 3. **Feature Importance**: Rank-1 constraint creates interpretable feature directions that can be analyzed
+4. **Attention Pattern Differences**: Significant KL divergence in attention patterns between base and LoRA models, particularly in layers 58, 42, and 52. Interactive visualization reveals how LoRA modifies attention during mathematical reasoning.
 
 ## Experiment Types
 
@@ -85,6 +86,26 @@ python analyze_lora_weights.py
 python lora_steering_experiment.py
 ```
 
+### 4. Attention Pattern Analysis
+```bash
+# Generate attention KL divergence analysis (supports up to 1024 tokens)
+python attention_kl_dashboard_generator_fast.py
+
+# Split data into JSON files for dynamic loading
+python split_attention_data.py
+
+# Serve the dashboard
+python -m http.server 8000
+# Then open http://localhost:8000/attention_kl_dashboard_dynamic.html
+```
+
+The attention dashboard provides:
+- Token-level KL divergence visualization between base and LoRA models
+- Interactive hover to see actual attention patterns
+- Color coding: cyan (base model), magenta (LoRA model), blue (both)
+- Adjustable KL scale slider for sensitivity control
+- Support for 1024-token sequences
+
 ## Key Files
 
 - `analyze_lora_weights.py`: Visualize LoRA weight matrices and compute similarities
@@ -94,6 +115,9 @@ python lora_steering_experiment.py
 - `lora_neuron_attribution_study.py`: Attribution analysis (experimental)
 - `lora_activation_classifier.py`: Train probes on activations
 - `cf/generate_aime_rollouts.py`: Generate counterfactual examples
+- `attention_kl_dashboard_generator_fast.py`: Generate KL divergence analysis between base/LoRA attention patterns
+- `attention_kl_dashboard_dynamic.html`: Interactive dashboard for exploring attention differences
+- `split_attention_data.py`: Split large attention data into manageable JSON files
 
 ## Dependencies
 
