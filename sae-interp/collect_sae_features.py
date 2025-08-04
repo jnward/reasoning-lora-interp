@@ -194,10 +194,10 @@ def main():
     parser.add_argument('--model-path', type=str, default='trained_sae.pt',
                        help='Path to trained SAE model')
     parser.add_argument('--data-dir', type=str, 
-                       default='../lora-activations-dashboard/backend/activations',
-                       help='Directory containing activation H5 files')
+                       default='../../lora-activations-dashboard/backend/activations',
+                       help='Directory containing activation H5 files') 
     parser.add_argument('--tokens-path', type=str,
-                       default='../lora-activations-dashboard/backend/rollout_tokens.json',
+                       default='../../lora-activations-dashboard/backend/rollout_tokens.json',
                        help='Path to rollout_tokens.json')
     parser.add_argument('--output-path', type=str, default='sae_features_data.json',
                        help='Output JSON file path')

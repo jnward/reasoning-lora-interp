@@ -30,33 +30,40 @@ class LatentTracker:
         self.device = device
         self.dead_threshold = dead_threshold
         
-        # Track cumulative activation counts
-        self.activation_counts = torch.zeros(n_features, device=device)
-        self.total_updates = 0
+        # Track last seen position for each feature
+        self.last_seen_at = torch.zeros(n_features, device=device)
+        self.total_tokens_seen = 0
     
     def update(self, sparse_activations):
-        """Update activation counts based on current batch."""
+        """Update last seen positions based on current batch."""
         # sparse_activations: [batch_size, n_features]
-        # Count non-zero activations for each feature
-        feature_active = (sparse_activations != 0).float().sum(dim=0)
-        self.activation_counts += feature_active
-        self.total_updates += sparse_activations.shape[0]
+        # Find which features are active in this batch
+        feature_active = (sparse_activations != 0).any(dim=0)
+        
+        # Update last seen position for active features
+        self.last_seen_at[feature_active] = self.total_tokens_seen
+        
+        # Update total tokens seen
+        self.total_tokens_seen += sparse_activations.shape[0]
     
     def get_dead_latents(self):
         """Get indices of dead latents based on threshold."""
-        # Calculate average activation rate per feature
-        avg_activation_rate = self.activation_counts / self.total_updates
+        # Calculate how long since each feature was last seen
+        tokens_since_last_seen = self.total_tokens_seen - self.last_seen_at
         
-        # Dead latents are those below threshold
-        dead_mask = avg_activation_rate < (1.0 / self.dead_threshold)
+        # Dead latents are those not seen in the last dead_threshold tokens
+        dead_mask = tokens_since_last_seen > self.dead_threshold
         dead_indices = torch.where(dead_mask)[0]
         
-        return dead_indices, avg_activation_rate
+        # For compatibility, also return activation rates (tokens since last seen / total tokens)
+        activation_rates = 1.0 - (tokens_since_last_seen / max(1, self.total_tokens_seen))
+        
+        return dead_indices, activation_rates
     
     def reset(self):
         """Reset tracking statistics."""
-        self.activation_counts.zero_()
-        self.total_updates = 0
+        self.last_seen_at.zero_()
+        self.total_tokens_seen = 0
 
 # %% Auxiliary Loss Function
 def auxiliary_loss(dead_latents, error, model, k, alpha=1/32):
@@ -124,7 +131,8 @@ def get_schedule_with_warmup_and_decay(optimizer, num_warmup_steps, total_steps)
     - Constant LR until half of total steps
     - 10x reduction after half of training
     """
-    half_steps = total_steps // 2
+    # half_steps = total_steps * 0.9
+    half_steps = total_steps * 1.1 # don't decay ever
     
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
@@ -188,25 +196,26 @@ class SimpleDataLoader:
     def __len__(self):
         return self.num_batches
 
-k = 16
-lr = 1e-3
-batch_size = 128
+k = 8
+lr = 5e-4
+batch_size = 512
 expansion_factor = 8
+alpha = 1/32
 
 # %% Training configuration
 config = {
-    'activation_dir': '../lora-activations-dashboard/backend/activations',
+    'activation_dir': '../../lora-activations-dashboard/backend/activations',
     'd_model': 192,
-    'dict_size': 192 * expansion_factor,  # 8x expansion factor
+    'dict_size': int(192 * expansion_factor),
     'k': k,  # top-k sparsity
     'batch_size': batch_size,
     'learning_rate': lr,  # Lower learning rate as in reference
     'warmup_steps': 100,
-    'aux_loss_alpha': 1/32,  # Auxiliary loss coefficient
+    'aux_loss_alpha': alpha,  # Auxiliary loss coefficient
     'dead_threshold': 1e6,
     'use_wandb': True,  # Enable wandb logging
     'wandb_project': 'lora-interp',
-    'wandb_run_name': f'sae_k{k}_dict{192*expansion_factor}_lr{lr}_batch{batch_size}',
+    'wandb_run_name': f'sae_k{k}_dict{192*expansion_factor}_lr{lr}_batch{batch_size}_alpha{alpha}',
 }
 
 print("Configuration:")
@@ -278,6 +287,10 @@ fvu_sum = 0
 num_batches = 0
 num_dead_latents_history = []
 
+# Track FVU over last 100 batches
+from collections import deque
+fvu_window = deque(maxlen=100)
+
 # Progress bar
 pbar = tqdm(dataloader, desc="Training")
 start_time = time.time()
@@ -326,8 +339,11 @@ for batch_idx, batch in enumerate(pbar):
     num_batches += 1
     num_dead_latents_history.append(len(dead_latents))
     
-    # Log to wandb
-    if config['use_wandb']:
+    # Add FVU to rolling window
+    fvu_window.append(fvu.item())
+    
+    # Log to wandb every 10th batch
+    if config['use_wandb'] and batch_idx % 10 == 0:
         wandb.log({
             'train/total_loss': total_loss.item(),
             'train/mse_loss': mse_loss.item(),
@@ -336,20 +352,20 @@ for batch_idx, batch in enumerate(pbar):
             'train/num_dead_latents': len(dead_latents),
             'train/dead_latent_rate': len(dead_latents) / config['dict_size'],
             'train/learning_rate': scheduler.get_last_lr()[0],
-            'train/step': batch_idx,
-        })
+        }, step=batch_idx)
     
     # Update progress bar
     if batch_idx % 10 == 0:
         avg_mse = mse_loss_sum / num_batches
         avg_aux = aux_loss_sum / num_batches
         avg_total = total_loss_sum / num_batches
-        avg_fvu = fvu_sum / num_batches
+        # Use rolling window average for FVU
+        avg_fvu_window = sum(fvu_window) / len(fvu_window) if fvu_window else fvu.item()
         current_lr = scheduler.get_last_lr()[0]
         
         pbar.set_postfix({
             'loss': f'{avg_total:.4f}',
-            'fvu': f'{avg_fvu:.4f}',
+            'fvu': f'{avg_fvu_window:.4f}',
             'dead': len(dead_latents),
             'lr': f'{current_lr:.2e}'
         })

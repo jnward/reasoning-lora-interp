@@ -13,7 +13,7 @@ import os
 from tqdm import tqdm
 
 
-def check_activations(model_path='trained_sae.pt', data_dir='../lora-activations-dashboard/backend/activations', 
+def check_activations(model_path='trained_sae.pt', data_dir='../../lora-activations-dashboard/backend/activations', 
                      n_samples=10000, device='cuda'):
     """Check activation statistics across features"""
     

@@ -840,15 +840,20 @@ print(f"\nOff-diagonal (cross-attribution):")
 print(f"  Mean: {np.mean(off_diagonal):.6f}")
 print(f"  Std: {np.std(off_diagonal):.6f}")
 
+# Create a version with masked diagonal for visualization
+attribution_matrix_masked = attribution_matrix_np.copy()
+np.fill_diagonal(attribution_matrix_masked, 0)
+
 # %%
 # Visualize the attribution matrix
 plt.figure(figsize=(12, 10))
 
 # Use a diverging colormap centered at 0
-vmax = np.percentile(np.abs(attribution_matrix_np), 99)
-plt.imshow(attribution_matrix_np, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
+# Use the off-diagonal values to compute vmax (excluding the diagonal)
+vmax = np.percentile(np.abs(off_diagonal), 99)
+plt.imshow(attribution_matrix_masked, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
 plt.colorbar(label='Attribution')
-plt.title('LoRA Feature Interaction Matrix - Max Attribution\n(attribution[i,j] = max |attribution| of feature j to feature i across positions)')
+plt.title('LoRA Feature Interaction Matrix - Max Attribution (Diagonal Masked)\n(attribution[i,j] = max |attribution| of feature j to feature i across positions)')
 plt.xlabel('Source Feature Index (j)')
 plt.ylabel('Target Feature Index (i)')
 plt.tight_layout()
@@ -943,15 +948,19 @@ print(tabulate(table_data, headers=headers, tablefmt="grid"))
 plt.figure(figsize=(14, 10))
 
 # Create a filtered version showing only strong interactions
-threshold = np.percentile(np.abs(attribution_matrix_np), 95)
+# Use only off-diagonal values for threshold computation
+threshold = np.percentile(np.abs(off_diagonal), 95)
 strong_interactions = attribution_matrix_np.copy()
 strong_interactions[np.abs(strong_interactions) < threshold] = 0
 
-# Plot
+# Plot - mask diagonal in strong interactions too
+strong_interactions_masked = strong_interactions.copy()
+np.fill_diagonal(strong_interactions_masked, 0)
+
 plt.subplot(1, 2, 1)
-plt.imshow(strong_interactions, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
+plt.imshow(strong_interactions_masked, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
 plt.colorbar(label='Attribution')
-plt.title('Strong Feature Interactions Only\n(Top 5% by magnitude)')
+plt.title('Strong Feature Interactions Only\n(Top 5% by magnitude, diagonal masked)')
 plt.xlabel('Target Feature Index')
 plt.ylabel('Source Feature Index')
 

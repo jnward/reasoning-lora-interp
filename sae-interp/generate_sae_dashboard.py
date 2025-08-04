@@ -121,6 +121,47 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
             background: white;
         }
         
+        /* Toggle switch */
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .toggle-switch {
+            position: relative;
+            width: 50px;
+            height: 26px;
+            background-color: #ccc;
+            border-radius: 13px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        .toggle-switch.active {
+            background-color: #3498db;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 20px;
+            height: 20px;
+            background-color: white;
+            border-radius: 50%;
+            transition: transform 0.3s;
+        }
+        
+        .toggle-switch.active .toggle-slider {
+            transform: translateX(24px);
+        }
+        
+        .toggle-label {
+            font-size: 14px;
+            color: #666;
+        }
+        
         /* Examples container */
         .examples-container {
             background: white;
@@ -277,6 +318,12 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
             <select class="feature-dropdown" id="activeFeatureSelect" onchange="loadFeature(this.value)">
                 <option value="">Select active feature...</option>
             </select>
+            <div class="toggle-container">
+                <span class="toggle-label">Only full examples:</span>
+                <div class="toggle-switch" id="toggleFullExamples" onclick="toggleFullExamplesFilter()">
+                    <div class="toggle-slider"></div>
+                </div>
+            </div>
             <span class="feature-info" id="featureInfo"></span>
         </div>
         
@@ -297,6 +344,7 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
         const metadata = ${json.dumps(metadata)};
         
         let currentFeature = 0;
+        let fullExamplesOnly = false;
         
         // Load feature on page load
         window.addEventListener('load', () => {
@@ -329,9 +377,40 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
                 .sort((a, b) => a - b);
         }
         
+        function toggleFullExamplesFilter() {
+            fullExamplesOnly = !fullExamplesOnly;
+            const toggle = document.getElementById('toggleFullExamples');
+            toggle.classList.toggle('active', fullExamplesOnly);
+            
+            // Repopulate dropdown
+            populateActiveFeatures();
+            
+            // If current feature doesn't meet criteria, navigate to next valid one
+            if (fullExamplesOnly) {
+                const validFeatures = getFilteredFeatures();
+                if (!validFeatures.includes(currentFeature) && validFeatures.length > 0) {
+                    loadFeature(validFeatures[0]);
+                }
+            }
+        }
+        
+        function getFilteredFeatures() {
+            const activeFeatures = getActiveFeatures();
+            
+            if (!fullExamplesOnly) {
+                return activeFeatures;
+            }
+            
+            // Filter to only features with max examples
+            return activeFeatures.filter(featureId => {
+                const stats = featuresData[featureId].stats;
+                return stats.n_examples === metadata.top_k;
+            });
+        }
+        
         function populateActiveFeatures() {
             const select = document.getElementById('activeFeatureSelect');
-            const activeFeatures = getActiveFeatures();
+            const activeFeatures = fullExamplesOnly ? getFilteredFeatures() : getActiveFeatures();
             
             // Clear existing options except the first
             select.innerHTML = '<option value="">Select active feature...</option>';
@@ -348,14 +427,37 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
             // Add summary to dropdown
             const summaryOption = document.createElement('option');
             summaryOption.disabled = true;
-            summaryOption.textContent = `── ${activeFeatures.length} active features total ──`;
+            const filterText = fullExamplesOnly ? 'features with full examples' : 'active features total';
+            summaryOption.textContent = `── ${activeFeatures.length} ${filterText} ──`;
             select.insertBefore(summaryOption, select.children[1]);
         }
         
         function navigateFeature(delta) {
-            const newFeature = currentFeature + delta;
-            if (newFeature >= 0 && newFeature < metadata.n_features) {
-                loadFeature(newFeature);
+            if (fullExamplesOnly) {
+                // Navigate through filtered features only
+                const validFeatures = getFilteredFeatures();
+                const currentIndex = validFeatures.indexOf(currentFeature);
+                
+                if (currentIndex === -1) {
+                    // Current feature not in filtered list, go to first/last
+                    if (delta > 0 && validFeatures.length > 0) {
+                        loadFeature(validFeatures[0]);
+                    } else if (delta < 0 && validFeatures.length > 0) {
+                        loadFeature(validFeatures[validFeatures.length - 1]);
+                    }
+                    return;
+                }
+                
+                const newIndex = currentIndex + delta;
+                if (newIndex >= 0 && newIndex < validFeatures.length) {
+                    loadFeature(validFeatures[newIndex]);
+                }
+            } else {
+                // Normal navigation
+                const newFeature = currentFeature + delta;
+                if (newFeature >= 0 && newFeature < metadata.n_features) {
+                    loadFeature(newFeature);
+                }
             }
         }
         
@@ -369,8 +471,15 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
             document.getElementById('featureInput').value = featureIdx;
             
             // Update navigation buttons
-            document.getElementById('prevBtn').disabled = featureIdx === 0;
-            document.getElementById('nextBtn').disabled = featureIdx === metadata.n_features - 1;
+            if (fullExamplesOnly) {
+                const validFeatures = getFilteredFeatures();
+                const currentIndex = validFeatures.indexOf(featureIdx);
+                document.getElementById('prevBtn').disabled = currentIndex <= 0;
+                document.getElementById('nextBtn').disabled = currentIndex === -1 || currentIndex >= validFeatures.length - 1;
+            } else {
+                document.getElementById('prevBtn').disabled = featureIdx === 0;
+                document.getElementById('nextBtn').disabled = featureIdx === metadata.n_features - 1;
+            }
             
             // Update feature info
             const featureData = featuresData[featureIdx];

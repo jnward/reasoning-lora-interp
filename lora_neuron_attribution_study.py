@@ -14,6 +14,11 @@ from tabulate import tabulate
 from tqdm import tqdm
 import types
 import math
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # %%
 # Configuration
@@ -22,7 +27,7 @@ lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
-lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-2*")
+lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*544")
 lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
 
@@ -278,9 +283,9 @@ import json
 import os
 
 # Configuration for MATH-500
-example_idx = 10  # 10th example as requested
-max_new_tokens = 4096
-generation_cache_file = f"math500_generation_example_{example_idx}.json"
+example_idx = 16  # 10th example as requested
+max_new_tokens = 256
+generation_cache_file = f"math500_generation_example_{example_idx}_{max_new_tokens}.json"
 
 # %%
 # Load MATH-500 dataset
@@ -291,66 +296,40 @@ dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
 example = dataset[example_idx]
 problem = example['problem']
 
-print(f"\nUsing example {example_idx}:")
-print(f"Problem: {problem[:200]}..." if len(problem) > 200 else f"Problem: {problem}")
+# print(f"\nUsing example {example_idx}:")
+# print(f"Problem: {problem[:200]}..." if len(problem) > 200 else f"Problem: {problem}")
 
+prompt = f"""<|im_start|>system
+You are a helpful mathematics assistant.
+<|im_end|>
+<|im_start|>user
+{problem}
+<|im_end|>
+<|im_start|>assistant
+<|im_start|>think
+Okay, so I need to compute this sum: 1 - 2 + 3 - 4 + 5 - ... + 99 - 100. Hmm, let me think about how to approach this.
+
+First, I notice that the signs alternate between positive and negative. The first term is positive, then negative, then positive again, and so on. So it's an alternating series where each term alternates between adding and subtracting consecutive integers starting from 1 up to 100. But wait, the last term is -100, right? Because the pattern is n - (n+1). Let me check: the first pair is 1 - 2, then 3 - 4, ..., up to 99 - 100. So there are 100 terms in total, but arranged in 50 pairs, each consisting of an odd number minus the next even number.
+
+So maybe I can group them into these pairs and compute the sum of each pair first. Let's try that. Each pair is (2k - 1) - 2k for k = 1 to 50. Wait, when k=1: 1 - """
+
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 # %%
-# Check if generation already exists
-if os.path.exists(generation_cache_file):
-    print(f"\nLoading cached generation from {generation_cache_file}")
-    with open(generation_cache_file, 'r') as f:
-        cache_data = json.load(f)
-    prompt = cache_data['full_text']
-    generated_text = cache_data['generated_text']
-    input_prompt = cache_data['input_prompt']
-else:
-    # Format prompt for generation
-    system_prompt = "You are a helpful mathematics assistant. Please think step by step to solve the problem."
-    input_prompt = (
-        f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-        f"<|im_start|>user\n{problem}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
+with torch.no_grad():
+    generated_ids = model.generate(
+        inputs.input_ids,
+        max_new_tokens=max_new_tokens,
+        # temperature=0.7,
+        do_sample=False,
+        # top_p=0.95,
+        pad_token_id=tokenizer.eos_token_id,
     )
-    
-    print("\nGenerating response...")
-    
-    # Tokenize input
-    inputs = tokenizer(input_prompt, return_tensors="pt").to(model.device)
-    
-    # Generate with the model
-    with torch.no_grad():
-        generated_ids = model.generate(
-            inputs.input_ids,
-            max_new_tokens=max_new_tokens,
-            # temperature=0.7,
-            do_sample=False,
-            # top_p=0.95,
-            pad_token_id=tokenizer.eos_token_id
-        )
-    
-    # Decode the generation
-    prompt = tokenizer.decode(generated_ids[0], skip_special_tokens=False)
-    generated_text = tokenizer.decode(generated_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=False)
-    
-    # Save to cache
-    cache_data = {
-        'example_idx': example_idx,
-        'problem': problem,
-        'input_prompt': input_prompt,
-        'generated_text': generated_text,
-        'full_text': prompt
-    }
-    
-    with open(generation_cache_file, 'w') as f:
-        json.dump(cache_data, f, indent=2)
-    
-    print(f"Generation saved to {generation_cache_file}")
-
-print(f"\nGenerated response preview: {generated_text[:200]}...")
+generated_text = tokenizer.decode(*generated_ids)
+print(f"\nGenerated response: {generated_text}...")
 
 # %%
 # Tokenize and display tokens with positions
-inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+inputs = tokenizer(generated_text, return_tensors="pt").to(model.device)
 input_ids = inputs['input_ids'][:, :512]
 
 # %%
@@ -376,7 +355,7 @@ print("="*80 + "\n")
 
 # %%
 # USER: HARDCODE YOUR TARGET POSITION HERE BASED ON THE PRINTED TOKENS ABOVE
-target_position = 194  # Use -1 for last token, or specify a position
+target_position = 288  # Use -1 for last token, or specify a position
 
 # %%
 # Compute attribution
@@ -447,7 +426,7 @@ print("="*70)
 # - positive_token_id: The token you want the model to predict (target)
 # - negative_token_id: The token you want to contrast against (counterfactual)
 
-positive_token_id = 1988  # Set this to the token ID for positive logit
+positive_token_id = 13824  # Set this to the token ID for positive logit
 negative_token_id = 2055  # Set this to the token ID for negative logit
 
 # If not specified, use top 2 tokens as default
@@ -517,126 +496,277 @@ sorted_attributions = sorted(
     reverse=True
 )
 
-# Display top positive attributions
-print(f"\nTop 30 LoRA neuron activations by attribution to logit difference at position {target_position}:")
-print(f"Metric: logit('{positive_token}') - logit('{negative_token}') = {positive_logit.item() - negative_logit.item():.3f}")
-print(f"(Attribution = Gradient × Activation)")
-
-# Prepare table data for top attributions
-table_data = []
-for i, entry in enumerate(sorted_attributions[:30]):
-    # Format token for display
-    display_token = repr(entry['token'])[1:-1][:20]  # Truncate long tokens
-    
-    table_data.append([
-        i + 1,
-        entry['position'],
-        display_token,
-        entry['layer'],
-        f"{entry['attribution']:.6f}",
-        f"{entry['activation']:.6f}",
-        f"{entry['gradient']:.6f}"
-    ])
-
-# Print table
-headers = ["Rank", "Pos", "Token", "Layer/Module", "Attribution", "Activation", "Gradient"]
-print(tabulate(table_data, headers=headers, tablefmt="grid"))
-
-# Also show bottom attributions (most negative)
-print(f"\nBottom 20 LoRA neuron activations (most negative attribution):")
-table_data_bottom = []
-for i, entry in enumerate(sorted_attributions[-20:]):
-    # Format token for display
-    display_token = repr(entry['token'])[1:-1][:20]
-    
-    table_data_bottom.append([
-        len(sorted_attributions) - 19 + i,
-        entry['position'],
-        display_token,
-        entry['layer'],
-        f"{entry['attribution']:.6f}",
-        f"{entry['activation']:.6f}",
-        f"{entry['gradient']:.6f}"
-    ])
-
-print(tabulate(table_data_bottom, headers=headers, tablefmt="grid"))
 
 # %%
-# Summary statistics
-attribution_values = [entry['attribution'] for entry in all_attributions]
+# Create attribution heatmap visualization
+print("\nCreating interactive attribution heatmap...")
 
-print(f"\nAttribution Statistics:")
-print(f"Total attribution entries: {len(attribution_values)}")
-print(f"Sum of all attributions: {sum(attribution_values):.6f}")
-print(f"Mean attribution: {np.mean(attribution_values):.6f}")
-print(f"Max attribution: {max(attribution_values):.6f}")
-print(f"Min attribution: {min(attribution_values):.6f}")
-print(f"Std dev: {np.std(attribution_values):.6f}")
-
-# Per-layer statistics
-from collections import defaultdict
-layer_stats = defaultdict(list)
+# Organize attribution data into a matrix
+# First, get unique layers and their order
+unique_layers = []
+seen_layers = set()
 for entry in all_attributions:
-    layer_stats[entry['layer']].append(entry['attribution'])
+    if entry['layer'] not in seen_layers:
+        unique_layers.append(entry['layer'])
+        seen_layers.add(entry['layer'])
 
-print(f"\nTop 10 layers by mean attribution:")
-layer_means = [(layer, np.mean(attrs)) for layer, attrs in layer_stats.items()]
-layer_means.sort(key=lambda x: x[1], reverse=True)
+# Create mapping from layer to index
+layer_to_idx = {layer: idx for idx, layer in enumerate(unique_layers)}
 
-for i, (layer, mean_attr) in enumerate(layer_means[:10]):
-    print(f"{i+1:2d}. {layer}: {mean_attr:.6f}")
+# Get number of positions to visualize (up to target position + 1)
+num_positions = min(target_position + 1, input_ids.shape[1])
 
+# Initialize attribution matrix: [num_features, num_positions]
+attribution_matrix = np.zeros((len(unique_layers), num_positions))
+
+# Fill the matrix
+for entry in all_attributions:
+    layer_idx = layer_to_idx[entry['layer']]
+    pos = entry['position']
+    if pos < num_positions:
+        attribution_matrix[layer_idx, pos] = entry['attribution']
+
+# Prepare data for Plotly
+# Token labels for x-axis
+token_labels = [f"{i}: {repr(tokens[i])[1:-1][:30]}" for i in range(num_positions)]
+# Feature labels for y-axis
+feature_labels = [f"{layer.split('layer')[1].split('.')[0]}.{'.'.join(layer.split('.')[2:])}" for layer in unique_layers]
+
+# Create hover text with detailed information
+hover_text = []
+for i, layer in enumerate(unique_layers):
+    row_hover = []
+    for j in range(num_positions):
+        row_hover.append(f"Feature: {layer}<br>Position: {j}<br>Token: {repr(tokens[j])[1:-1]}<br>Attribution: {attribution_matrix[i, j]:.6f}")
+    hover_text.append(row_hover)
+
+# Create interactive heatmap
+# Use actual max value for color scale
+vmax = np.abs(attribution_matrix).max()
+
+fig = go.Figure(data=go.Heatmap(
+    z=attribution_matrix,
+    x=token_labels,
+    y=feature_labels,
+    colorscale='RdBu_r',
+    zmid=0,
+    zmin=-vmax,
+    zmax=vmax,
+    hovertext=hover_text,
+    hoverinfo='text',
+    colorbar=dict(title="Attribution")
+))
+
+# Add vertical line at target position
+fig.add_vline(x=target_position, line_width=2, line_dash="dash", line_color="green", opacity=0.7)
+
+# Update layout
+fig.update_layout(
+    title=dict(
+        text=f'LoRA Feature Attribution Heatmap<br>Target: position {target_position} ("{repr(tokens[target_position])[1:-1]}")<br>'
+             f'Metric: logit("{positive_token}") - logit("{negative_token}") = {positive_logit.item() - negative_logit.item():.3f}',
+        x=0.5,
+        xanchor='center'
+    ),
+    xaxis_title="Token Position",
+    yaxis_title="LoRA Feature (Layer.Module)",
+    height=max(600, len(unique_layers) * 15),
+    width=max(800, num_positions * 15),
+    xaxis=dict(tickangle=-90)
+)
+
+# Save as HTML
+heatmap_file = f'lora_attribution_heatmap_example_{example_idx}_pos_{target_position}.html'
+fig.write_html(heatmap_file)
+print(f"Interactive heatmap saved to {heatmap_file}")
+fig.show()
 
 # %%
-# Save detailed results
-import json
-results_file = f"lora_attribution_results_math500_example_{example_idx}.json"
+# Create a focused heatmap showing only the most important features
+print("\nCreating focused interactive attribution heatmap (top features only)...")
 
-# Get top attributions for saving
-top_positive = sorted_attributions[:100]
-top_negative = sorted_attributions[-100:]
+# Calculate total absolute attribution per feature
+feature_importance = np.abs(attribution_matrix).sum(axis=1)
+top_k_features = 50  # Show top 50 most important features
 
-save_results = {
-    'example_idx': example_idx,
-    'problem': problem,
-    'generated_text': generated_text,
-    'target_position': target_position,
-    'target_token': tokens[target_position],
-    'positive_token': positive_token,
-    'positive_token_id': positive_token_id,
-    'positive_logit': positive_logit.item(),
-    'negative_token': negative_token,
-    'negative_token_id': negative_token_id,
-    'negative_logit': negative_logit.item(),
-    'logit_difference': positive_logit.item() - negative_logit.item(),
-    'top_positive_attributions': [
-        {
-            'layer': entry['layer'],
-            'position': entry['position'],
-            'token': entry['token'],
-            'attribution': entry['attribution'],
-            'activation': entry['activation'],
-            'gradient': entry['gradient']
-        }
-        for entry in top_positive
-    ],
-    'top_negative_attributions': [
-        {
-            'layer': entry['layer'],
-            'position': entry['position'],
-            'token': entry['token'],
-            'attribution': entry['attribution'],
-            'activation': entry['activation'],
-            'gradient': entry['gradient']
-        }
-        for entry in top_negative
-    ]
-}
+# Get indices of top features
+top_feature_indices = np.argsort(feature_importance)[-top_k_features:][::-1]
 
-with open(results_file, 'w') as f:
-    json.dump(save_results, f, indent=2)
+# Create subset matrix
+focused_matrix = attribution_matrix[top_feature_indices, :]
+focused_layers = [unique_layers[i] for i in top_feature_indices]
 
-print(f"\nDetailed results saved to {results_file}")
+# Prepare data for focused heatmap
+focused_feature_labels = [f"{layer.split('layer')[1].split('.')[0]}.{'.'.join(layer.split('.')[2:])}" for layer in focused_layers]
+
+# Create hover text for focused heatmap
+focused_hover_text = []
+for i, layer in enumerate(focused_layers):
+    row_hover = []
+    for j in range(num_positions):
+        row_hover.append(f"Feature: {layer}<br>Position: {j}<br>Token: {repr(tokens[j])[1:-1]}<br>Attribution: {focused_matrix[i, j]:.6f}")
+    focused_hover_text.append(row_hover)
+
+# Create focused interactive heatmap
+# Use actual max value for the focused matrix
+vmax_focused = np.abs(focused_matrix).max()
+
+fig_focused = go.Figure(data=go.Heatmap(
+    z=focused_matrix,
+    x=token_labels,
+    y=focused_feature_labels,
+    colorscale='RdBu_r',
+    zmid=0,
+    zmin=-vmax_focused,
+    zmax=vmax_focused,
+    hovertext=focused_hover_text,
+    hoverinfo='text',
+    colorbar=dict(title="Attribution")
+))
+
+# Add vertical line at target position
+fig_focused.add_vline(x=target_position, line_width=2, line_dash="dash", line_color="green", opacity=0.7)
+
+# Update layout
+fig_focused.update_layout(
+    title=dict(
+        text=f'Top {top_k_features} LoRA Features by Attribution<br>Target: position {target_position} ("{repr(tokens[target_position])[1:-1]}")',
+        x=0.5,
+        xanchor='center'
+    ),
+    xaxis_title="Token Position",
+    yaxis_title="LoRA Feature (Layer.Module.Adapter)",
+    height=800,
+    width=max(800, num_positions * 15),
+    xaxis=dict(tickangle=-90)
+)
+
+# Save focused heatmap
+focused_heatmap_file = f'lora_attribution_heatmap_focused_example_{example_idx}_pos_{target_position}.html'
+fig_focused.write_html(focused_heatmap_file)
+print(f"Focused interactive heatmap saved to {focused_heatmap_file}")
+fig_focused.show()
+
+# %%
+# Create position-wise attribution summary
+print("\nCreating interactive position-wise attribution summary...")
+
+# Sum attributions by position
+position_attributions = attribution_matrix.sum(axis=0)
+
+# Create bar colors
+bar_colors = ['red' if x < 0 else 'blue' for x in position_attributions]
+
+# Create hover text for bars
+bar_hover_text = [f"Position: {i}<br>Token: {repr(tokens[i])[1:-1]}<br>Total Attribution: {position_attributions[i]:.6f}" 
+                  for i in range(num_positions)]
+
+# Create interactive bar chart
+fig_bar = go.Figure()
+
+# Add bars
+fig_bar.add_trace(go.Bar(
+    x=token_labels,
+    y=position_attributions,
+    marker_color=bar_colors,
+    hovertext=bar_hover_text,
+    hoverinfo='text',
+    name='Attribution'
+))
+
+# Add vertical line at target position
+fig_bar.add_vline(x=target_position, line_width=2, line_dash="dash", line_color="green", opacity=0.7)
+
+# Update layout
+fig_bar.update_layout(
+    title=dict(
+        text=f'Total Attribution by Token Position<br>Target: position {target_position}',
+        x=0.5,
+        xanchor='center'
+    ),
+    xaxis_title="Token Position",
+    yaxis_title="Total Attribution",
+    height=600,
+    width=max(800, num_positions * 15),
+    xaxis=dict(tickangle=-90),
+    showlegend=False
+)
+
+# Save bar chart
+position_summary_file = f'lora_attribution_by_position_example_{example_idx}_pos_{target_position}.html'
+fig_bar.write_html(position_summary_file)
+print(f"Interactive position summary saved to {position_summary_file}")
+fig_bar.show()
+
+# %%
+# Create a combined visualization with subplots
+print("\nCreating combined interactive visualization...")
+
+# Create subplots
+fig_combined = make_subplots(
+    rows=2, cols=1,
+    row_heights=[0.7, 0.3],
+    shared_xaxes=True,
+    subplot_titles=(f'Top {top_k_features} LoRA Features Attribution', 'Total Attribution by Position'),
+    vertical_spacing=0.1
+)
+
+# Add focused heatmap to top subplot
+fig_combined.add_trace(
+    go.Heatmap(
+        z=focused_matrix,
+        x=token_labels,
+        y=focused_feature_labels,
+        colorscale='RdBu_r',
+        zmid=0,
+        zmin=-vmax_focused,
+        zmax=vmax_focused,
+        hovertext=focused_hover_text,
+        hoverinfo='text',
+        colorbar=dict(title="Attribution", x=1.02)
+    ),
+    row=1, col=1
+)
+
+# Add bar chart to bottom subplot
+fig_combined.add_trace(
+    go.Bar(
+        x=token_labels,
+        y=position_attributions,
+        marker_color=bar_colors,
+        hovertext=bar_hover_text,
+        hoverinfo='text',
+        showlegend=False
+    ),
+    row=2, col=1
+)
+
+# Add vertical lines at target position
+fig_combined.add_vline(x=target_position, line_width=2, line_dash="dash", line_color="green", opacity=0.7)
+
+# Update layout
+fig_combined.update_layout(
+    title=dict(
+        text=f'LoRA Attribution Analysis<br>Target: position {target_position} ("{repr(tokens[target_position])[1:-1]}")<br>'
+             f'Metric: logit("{positive_token}") - logit("{negative_token}") = {positive_logit.item() - negative_logit.item():.3f}',
+        x=0.5,
+        xanchor='center'
+    ),
+    height=1000,
+    width=max(1000, num_positions * 20),
+    showlegend=False
+)
+
+# Update x-axes
+fig_combined.update_xaxes(title_text="Token Position", tickangle=-90, row=2, col=1)
+fig_combined.update_yaxes(title_text="LoRA Feature", row=1, col=1)
+fig_combined.update_yaxes(title_text="Total Attribution", row=2, col=1)
+
+# Save combined visualization
+combined_file = f'lora_attribution_combined_example_{example_idx}_pos_{target_position}.html'
+fig_combined.write_html(combined_file)
+print(f"Combined interactive visualization saved to {combined_file}")
+fig_combined.show()
 
 # %%
 print("\nAttribution study complete!")

@@ -550,20 +550,14 @@ dashboard_html = f"""
             container.appendChild(currentLine);
             
             tokens.forEach((token, idx) => {{
-                // Check if token contains newline
-                if (token === '\\n' || token.includes('\\n')) {{
-                    // Add newline token to current line
-                    const tokenSpan = createTokenElement(token, idx, klValues[idx], minKL, maxKL);
-                    currentLine.appendChild(tokenSpan);
-                    
-                    // Start new line
+                const tokenSpan = createTokenElement(token, idx, klValues[idx], minKL, maxKL);
+                currentLine.appendChild(tokenSpan);
+                
+                // Only start a new line if the token is exactly a newline
+                if (token === '\\n') {{
                     currentLine = document.createElement('div');
                     currentLine.className = 'token-line';
                     container.appendChild(currentLine);
-                }} else {{
-                    // Add token to current line
-                    const tokenSpan = createTokenElement(token, idx, klValues[idx], minKL, maxKL);
-                    currentLine.appendChild(tokenSpan);
                 }}
             }});
         }}
@@ -586,16 +580,17 @@ dashboard_html = f"""
             const brightness = getBrightness(color);
             tokenSpan.style.color = brightness > 128 ? '#000' : '#fff';
             
-            // Token text - escape HTML but preserve spaces
+            // Token text - escape HTML and show newlines as literal \n
             let tokenDisplay = token
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;')
+                .replace(/\\n/g, '\\\\n')  // Show newlines as literal \n
                 .replace(/ /g, '&nbsp;');
             
-            // Show newline as visible character
+            // Special styling for pure newline token
             if (token === '\\n') {{
                 tokenDisplay = '↵';
                 tokenSpan.style.color = '#888';
