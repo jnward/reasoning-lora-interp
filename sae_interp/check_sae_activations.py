@@ -13,7 +13,7 @@ import os
 from tqdm import tqdm
 
 
-def check_activations(model_path='trained_sae.pt', data_dir='../../lora-activations-dashboard/backend/activations', 
+def check_activations(model_path='trained_sae_adapters_d-g-k-o-q-u-v.pt', data_dir=None, 
                      n_samples=10000, device='cuda'):
     """Check activation statistics across features"""
     
@@ -32,6 +32,31 @@ def check_activations(model_path='trained_sae.pt', data_dir='../../lora-activati
     
     print(f"Loaded SAE: d_model={config['d_model']}, dict_size={config['dict_size']}, k={config['k']}")
     
+    # Auto-detect data directory if not specified
+    if data_dir is None:
+        adapter_types = config.get('adapter_types', ['gate_proj', 'up_proj', 'down_proj'])
+        if set(adapter_types) == set(['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']):
+            # Full 7-adapter mode - check both locations
+            if os.path.exists('./activations_all_adapters'):
+                data_dir = './activations_all_adapters'
+            else:
+                data_dir = '../../lora-activations-dashboard/backend/activations_all_adapters'
+        elif set(adapter_types) == set(['gate_proj', 'up_proj', 'down_proj']):
+            # MLP-only mode - check both locations
+            if os.path.exists('./activations'):
+                data_dir = './activations'
+            else:
+                data_dir = '../../lora-activations-dashboard/backend/activations'
+        else:
+            # Custom adapter selection
+            adapter_str = '-'.join([a[:1] for a in sorted(adapter_types)])
+            if os.path.exists(f'./activations_{adapter_str}'):
+                data_dir = f'./activations_{adapter_str}'
+            else:
+                data_dir = f'../../lora-activations-dashboard/backend/activations_{adapter_str}'
+    
+    print(f"Using activation directory: {data_dir}")
+    
     # Collect activation statistics
     n_features = config['dict_size']
     feature_activations = {i: [] for i in range(n_features)}
@@ -43,7 +68,10 @@ def check_activations(model_path='trained_sae.pt', data_dir='../../lora-activati
     for rollout_file in tqdm(rollout_files, desc="Processing rollouts"):
         with h5py.File(rollout_file, 'r') as f:
             activations = f['activations'][:]
-            activations_flat = activations.reshape(-1, 192)
+            # Get dimensions from file
+            n_tokens, n_layers, n_projections = activations.shape
+            expected_dim = n_layers * len(config.get('adapter_types', ['gate_proj', 'up_proj', 'down_proj']))
+            activations_flat = activations.reshape(-1, expected_dim)
             
             # Sample random indices
             n_tokens = len(activations_flat)
@@ -128,4 +156,14 @@ def check_activations(model_path='trained_sae.pt', data_dir='../../lora-activati
 
 
 if __name__ == '__main__':
-    check_activations()
+    import argparse
+    parser = argparse.ArgumentParser(description='Check SAE activation statistics')
+    parser.add_argument('--model-path', type=str, default='trained_sae_adapters_d-g-k-o-q-u-v.pt',
+                       help='Path to trained SAE model')
+    parser.add_argument('--data-dir', type=str, default=None,
+                       help='Directory containing activation H5 files (auto-detected if not specified)')
+    parser.add_argument('--n-samples', type=int, default=10000,
+                       help='Number of samples to analyze')
+    
+    args = parser.parse_args()
+    check_activations(model_path=args.model_path, data_dir=args.data_dir, n_samples=args.n_samples)

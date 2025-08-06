@@ -602,9 +602,9 @@ def generate_html_dashboard(data: Dict[str, Any], output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate SAE interpretation dashboard')
-    parser.add_argument('--input', type=str, default='sae_features_data.json',
+    parser.add_argument('--input', type=str, default='sae_features_data_trained_sae_adapters_g-u-d-q-k-v-o.json',
                        help='Input JSON file with feature data')
-    parser.add_argument('--output', type=str, default='sae_dashboard.html',
+    parser.add_argument('--output', type=str, default='sae_dashboard_new.html',
                        help='Output HTML file')
     
     args = parser.parse_args()

@@ -148,20 +148,59 @@ def get_schedule_with_warmup_and_decay(optimizer, num_warmup_steps, total_steps)
     return LambdaLR(optimizer, lr_lambda)
 
 # %% Load all activations
-def load_all_activations(activation_dir):
-    """Load all activations from H5 files and flatten them."""
+def load_all_activations(activation_dir, adapter_types=None):
+    """Load all activations from H5 files and flatten them.
+    
+    Args:
+        activation_dir: Directory containing H5 files
+        adapter_types: List of adapter types to include (default: all 7)
+                      Options: ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']
+    """
     print("Loading all activations into memory...")
+    
+    # Default to all adapter types
+    if adapter_types is None:
+        adapter_types = ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']
+    
+    # Map adapter names to indices
+    all_adapters = ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']
+    adapter_indices = [all_adapters.index(a) for a in adapter_types]
     
     all_activations = []
     h5_files = sorted(glob(os.path.join(activation_dir, 'rollout_*.h5')))
     
+    # Check first file to determine format
+    with h5py.File(h5_files[0], 'r') as f:
+        projections = f.attrs.get('projections', 3)  # Default to 3 for backward compatibility
+        num_layers = f.attrs['num_layers']
+    
+    print(f"Detected {projections} projections per layer")
+    print(f"Loading adapters: {adapter_types}")
+    
     for file_path in tqdm(h5_files, desc="Loading files"):
         with h5py.File(file_path, 'r') as f:
-            # Load activations: shape (n_tokens, 64, 3)
+            # Load activations: shape (n_tokens, num_layers, projections)
             acts = f['activations'][:]
-            # Flatten to (n_tokens, 192)
-            acts_flat = acts.reshape(-1, 192)
+            
+            if projections == 3 and len(adapter_indices) > 3:
+                # Old format - only has MLP adapters
+                print("Warning: Old activation format detected. Only MLP adapters available.")
+                adapter_indices = [i for i in adapter_indices if i < 3]
+                if not adapter_indices:
+                    raise ValueError("No MLP adapters requested but file only contains MLP activations")
+            
+            # Select only requested adapters
+            acts_selected = acts[:, :, adapter_indices]
+            
+            # Flatten to (n_tokens, num_layers * len(adapter_types))
+            acts_flat = acts_selected.reshape(-1, num_layers * len(adapter_indices))
             all_activations.append(acts_flat)
+    
+    # Verify adapter consistency
+    if len(adapter_indices) != len(adapter_types):
+        print(f"\nWarning: Only {len(adapter_indices)} of {len(adapter_types)} requested adapters found in data.")
+        print(f"Requested: {adapter_types}")
+        print(f"Available indices: {adapter_indices} (from {all_adapters[:projections]})")
     
     # Concatenate all activations
     all_activations = np.concatenate(all_activations, axis=0)
@@ -169,7 +208,7 @@ def load_all_activations(activation_dir):
     print(f"Shape: {all_activations.shape}")
     print(f"Memory usage: {all_activations.nbytes / 1e9:.2f} GB")
     
-    return all_activations
+    return all_activations, num_layers * len(adapter_indices)
 
 # %% Simple DataLoader
 class SimpleDataLoader:
@@ -196,17 +235,38 @@ class SimpleDataLoader:
     def __len__(self):
         return self.num_batches
 
-k = 8
+k = 16
 lr = 5e-4
 batch_size = 512
 expansion_factor = 8
 alpha = 1/32
 
 # %% Training configuration
+# Adapter types to train on (default: all)
+adapter_types = ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']
+# adapter_types = ['gate_proj', 'up_proj', 'down_proj']  # MLP only
+# adapter_types = ['q_proj', 'k_proj', 'v_proj', 'o_proj']  # Attention only
+
+# Determine activation directory based on adapter types
+if set(adapter_types) == set(['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']):
+    # Full 7-adapter mode - check both locations
+    if os.path.exists('./activations_all_adapters'):
+        activation_dir = './activations_all_adapters'
+    else:
+        activation_dir = '../../lora-activations-dashboard/backend/activations_all_adapters'
+else:
+    # Custom adapter selection
+    adapter_str = '-'.join([a[:1] for a in sorted(adapter_types)])
+    if os.path.exists(f'./activations_{adapter_str}'):
+        activation_dir = f'./activations_{adapter_str}'
+    else:
+        activation_dir = f'../../lora-activations-dashboard/backend/activations_{adapter_str}'
+
 config = {
-    'activation_dir': '../../lora-activations-dashboard/backend/activations',
-    'd_model': 192,
-    'dict_size': int(192 * expansion_factor),
+    'activation_dir': activation_dir,
+    'adapter_types': adapter_types,
+    'd_model': None,  # Will be set based on loaded data
+    'dict_size': None,  # Will be set based on d_model
     'k': k,  # top-k sparsity
     'batch_size': batch_size,
     'learning_rate': lr,  # Lower learning rate as in reference
@@ -215,12 +275,19 @@ config = {
     'dead_threshold': 1e6,
     'use_wandb': True,  # Enable wandb logging
     'wandb_project': 'lora-interp',
-    'wandb_run_name': f'sae_k{k}_dict{192*expansion_factor}_lr{lr}_batch{batch_size}_alpha{alpha}',
+    'wandb_run_name': None,  # Will be set based on adapter types
 }
 
 print("Configuration:")
 for k, v in config.items():
     print(f"  {k}: {v}")
+
+# Check if activation directory exists
+if not os.path.exists(config['activation_dir']):
+    print(f"\nWarning: Activation directory '{config['activation_dir']}' not found!")
+    print("Please run generate_activations_multigpu.py or generate_activations_data.py first with the appropriate adapter types.")
+    print(f"Example: python generate_activations_multigpu.py --adapter-types {' '.join(adapter_types)}")
+    raise FileNotFoundError(f"Activation directory not found: {config['activation_dir']}")
 
 # %% Initialize wandb
 if config['use_wandb']:
@@ -232,7 +299,20 @@ if config['use_wandb']:
     print("Wandb initialized")
 
 # %% Load data
-activations = load_all_activations(config['activation_dir'])
+activations, d_model = load_all_activations(config['activation_dir'], config['adapter_types'])
+
+# Update config with actual d_model
+config['d_model'] = d_model
+config['dict_size'] = int(d_model * expansion_factor)
+
+# Update wandb run name
+adapter_str = '-'.join([a[:1] for a in sorted(config['adapter_types'])])  # e.g., 'd-g-k-o-q-u-v'
+config['wandb_run_name'] = f'sae_k{k}_dict{d_model*expansion_factor}_lr{lr}_batch{batch_size}_alpha{alpha}_adapters_{adapter_str}'
+
+print(f"\nUpdated configuration:")
+print(f"  d_model: {config['d_model']}")
+print(f"  dict_size: {config['dict_size']}")
+print(f"  adapters: {config['adapter_types']}")
 
 # %% Create dataloader
 dataloader = SimpleDataLoader(
@@ -416,7 +496,8 @@ if config['use_wandb']:
     })
 
 # %% Save model
-save_path = 'trained_sae.pt'
+adapter_str = '-'.join([a[:1] for a in config['adapter_types']])
+save_path = f'trained_sae_adapters_{adapter_str}.pt'
 torch.save({
     'model_state_dict': model.state_dict(),
     'config': config,

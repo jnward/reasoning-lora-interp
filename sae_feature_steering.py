@@ -13,11 +13,11 @@ import os
 
 # Add sae-interp to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), 'sae-interp'))
-from batch_topk_sae import BatchTopKSAE
+from sae_interp.batch_topk_sae import BatchTopKSAE
 
 # %%
 # Configuration - modify these values as needed
-SAE_FEATURE_IDX = 42  # SAE feature index to use for steering
+SAE_FEATURE_IDX = 84  # SAE feature index to use for steering
 STEERING_STRENGTHS = [0.0, 10.0, 25.0, 50.0, 100.0, 200.0]  # List of steering strengths to test
 PROBLEM_IDX = 10  # MATH500 problem index
 PREFIX_TOKENS = 100  # Number of tokens to generate for prefix
@@ -32,7 +32,7 @@ print(f"  Problem index: {PROBLEM_IDX}")
 # Model configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
 lora_path = "/workspace/models/ckpts_1.1"
-sae_path = "/workspace/reasoning_interp/sae-interp/trained_sae.pt"
+sae_path = "/workspace/reasoning_interp/sae_interp/trained_sae.pt"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
