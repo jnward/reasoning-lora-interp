@@ -379,7 +379,7 @@ class OptimizedTopKCollector:
                     
                     # Get tracker based on polarity
                     tracker = trackers[polarity]
-                    tracker_idx = feature_idx // 2 if polarity == 'positive' else feature_idx // 2
+                    tracker_idx = feature_idx  # Don't divide by 2 - feature_idx is already correct!
                     
                     # Get top-k examples
                     top_examples = tracker.get_top_k(tracker_idx)
