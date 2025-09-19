@@ -3,6 +3,6 @@
 lora_checkpoints/
 *.log
 */wandb
-*/CLAUDE.md
+*CLAUDE.md
 *.json
 *.h5

@@ -1,0 +1,3 @@
+[submodule "s1_peft"]
+	path = s1_peft
+	url = https://github.com/jnward/s1_peft.git
