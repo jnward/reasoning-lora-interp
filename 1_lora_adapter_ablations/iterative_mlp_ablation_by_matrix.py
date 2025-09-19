@@ -14,12 +14,10 @@ import textwrap
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
-lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-2*")
-lora_dir = sorted(lora_dirs)[-1]
+lora_dir = "/workspace/reasoning_interp/lora_checkpoints/s1-lora-32B-r1-20250627_013544"
 print(f"Using LoRA from: {lora_dir}")
 
 # Ablation strategy: if True, ablate most important layers first; if False, ablate least important first

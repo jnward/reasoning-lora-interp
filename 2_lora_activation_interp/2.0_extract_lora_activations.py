@@ -280,10 +280,7 @@ def main():
         args.adapter_types = ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']
     
     # Find LoRA checkpoint
-    lora_dirs = glob.glob(f"{args.lora_path}/s1-lora-32B-r{args.rank}-*544")
-    if not lora_dirs:
-        raise ValueError(f"No LoRA checkpoint found at {args.lora_path}")
-    lora_dir = sorted(lora_dirs)[-1]
+    lora_dir = "/workspace/reasoning_interp/lora_checkpoints/s1-lora-32B-r1-20250627_013544"
     print(f"Using LoRA from: {lora_dir}")
     
     # Determine number of GPUs

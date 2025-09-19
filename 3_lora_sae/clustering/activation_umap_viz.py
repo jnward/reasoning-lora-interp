@@ -31,7 +31,7 @@ class Config:
     """Configuration for the visualization pipeline."""
     
     # Data paths
-    activation_dir = "activations_all_adapters"
+    activation_dir = "../2_lora_activation_interp/activations_all_adapters"
     
     # Sampling parameters
     n_samples = 100_000  # Number of samples to use

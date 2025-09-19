@@ -166,7 +166,7 @@ def main():
                        default='hierarchical_categorized.json',
                        help='Path to categorized features JSON')
     parser.add_argument('--activations-dir', type=str,
-                       default='/workspace/reasoning_interp/sae_interp/activations_all_adapters',
+                       default='/workspace/reasoning_interp/2_lora_activation_interp/activations_all_adapters',
                        help='Directory containing H5 activation files')
     parser.add_argument('--output', type=str,
                        default='activation_densities.json',

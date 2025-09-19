@@ -2,7 +2,7 @@
 """
 Plot Ablation Results
 
-This notebook loads the saved ablation results and creates publication-quality plots:
+This notebook loads the saved ablation results and creates figures:
 1. Per-layer KL divergence bar plot
 2. Adapter ablation heatmap
 """

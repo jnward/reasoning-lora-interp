@@ -33,7 +33,7 @@ print("Libraries imported successfully")
 # %%
 # Configuration
 SAE_PATH = "/workspace/reasoning_interp/sae_interp/trained_sae_adapters_g-u-d-q-k-v-o.pt"
-ACTIVATIONS_DIR = "/workspace/reasoning_interp/sae_interp/activations_all_adapters"
+ACTIVATIONS_DIR = "/workspace/reasoning_interp/2_lora_activation_interp/activations_all_adapters"
 CATEGORIES_PATH = "/workspace/reasoning_interp/sae_interp/autointerp/categorized_features.json"
 OUTPUT_HTML = "feature_clusters_coactivation.html"
 

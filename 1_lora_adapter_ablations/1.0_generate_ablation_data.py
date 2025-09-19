@@ -29,7 +29,6 @@ sns.set_palette("husl")
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/workspace/models/ckpts_1.1"
 rank = 1
 
 # Experiment configuration
@@ -37,9 +36,7 @@ RANDOM_SEED = 42  # Set seed for reproducible sampling
 N_EXAMPLES = 16   # Number of examples to sample from dataset
 MAX_SEQ_LENGTH = 2048  # Maximum sequence length (for memory constraints)
 
-# Find the rank-1 LoRA checkpoint
-lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*544")
-lora_dir = sorted(lora_dirs)[-1] if lora_dirs else None
+lora_dir = "/workspace/reasoning_interp/lora_checkpoints/s1-lora-32B-r1-20250627_013544"
 print(f"Using LoRA from: {lora_dir}")
 
 # %%

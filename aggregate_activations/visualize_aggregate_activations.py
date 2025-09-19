@@ -1,3 +1,7 @@
+# Generate and visualize LoRA activations across every token
+# in a generated context. This script produces heatmaps of
+# activations across all layers and token positions.
+
 # %%
 import torch
 import torch.nn.functional as F
@@ -19,9 +23,7 @@ lora_path = "/workspace/s1_peft/ckpts_1.1"
 rank = 1
 
 # Find the rank-1 LoRA checkpoint
-# lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*/checkpoint-100")
-lora_dirs = glob.glob("/workspace/s1_peft/ckpts_1.1/s1-lora-32B-r1-mlp_only-10samples-20250706_060547")
-lora_dir = sorted(lora_dirs)[-1]
+lora_dir = "/workspace/s1_peft/ckpts_lora/s1-lora-32B-r1-20250627_013544"
 print(f"Using LoRA from: {lora_dir}")
 
 # %%
@@ -319,7 +321,7 @@ def create_html_visualization(tokens, probe_activations, proj_type, layer_subset
 # %%
 # Display visualizations for a subset of layers
 # Show first, middle, and last few layers
-interesting_layers = range(n_layers)
+interesting_layers = [30, 31, 32]
 interesting_layers = [l for l in interesting_layers if l < n_layers]
 
 # %%
@@ -385,7 +387,5 @@ fig.text(0.5, 0.01, 'Green lines indicate double newline tokens (step boundaries
          ha='center', color='green', fontsize=10)
 
 plt.show()
-
-# %%
 
 # %%

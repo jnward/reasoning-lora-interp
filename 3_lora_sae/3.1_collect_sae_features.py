@@ -325,9 +325,9 @@ def main():
                        help='Path to rollout_tokens.json')
     parser.add_argument('--output-path', type=str, default=None,
                        help='Output JSON file path')
-    parser.add_argument('--top-k', type=int, default=10,
+    parser.add_argument('--top-k', type=int, default=32,
                        help='Number of top examples per feature')
-    parser.add_argument('--context-window', type=int, default=10,
+    parser.add_argument('--context-window', type=int, default=48,
                        help='Context tokens on each side')
     parser.add_argument('--device', type=str, default='cuda',
                        help='Device to use')
@@ -355,16 +355,10 @@ def main():
     if args.data_dir is None:
         adapter_types = config.get('adapter_types', ['gate_proj', 'up_proj', 'down_proj'])
         if set(adapter_types) == set(['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']):
-            if os.path.exists('./activations_all_adapters'):
-                args.data_dir = './activations_all_adapters'
-            else:
-                args.data_dir = '../../lora-activations-dashboard/backend/activations_all_adapters'
+            args.data_dir = '../2_lora_activation_interp/activations_all_adapters'
         else:
             adapter_str = '-'.join([a[:1] for a in sorted(adapter_types)])
-            if os.path.exists(f'./activations_{adapter_str}'):
-                args.data_dir = f'./activations_{adapter_str}'
-            else:
-                args.data_dir = f'../../lora-activations-dashboard/backend/activations_{adapter_str}'
+            args.data_dir = f'../2_lora_activation_interp/activations_{adapter_str}'
     
     print(f"Using activation directory: {args.data_dir}")
     

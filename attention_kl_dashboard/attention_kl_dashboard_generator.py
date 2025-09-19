@@ -18,16 +18,12 @@ import hashlib
 # %%
 # Configuration
 base_model_id = "Qwen/Qwen2.5-32B-Instruct"
-lora_path = "/workspace/models/ckpts_1.1"
-rank = 1
+lora_dir = "/workspace/reasoning_interp/lora_checkpoints/s1-lora-32B-r1-20250627_013544"
 CACHE_DIR = "attention_kl_cache"
 
 # Create cache directory
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Find the rank-1 LoRA checkpoint
-lora_dirs = glob.glob(f"{lora_path}/s1-lora-32B-r{rank}-*544")
-lora_dir = sorted(lora_dirs)[-1]
 print(f"Using LoRA from: {lora_dir}")
 
 # %%

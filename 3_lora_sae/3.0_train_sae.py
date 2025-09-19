@@ -15,6 +15,7 @@ import os
 from tqdm import tqdm
 import time
 import wandb
+import random
 from batch_topk_sae import BatchTopKSAE
 
 # %% Set device
@@ -240,6 +241,7 @@ lr = 5e-4
 batch_size = 512
 expansion_factor = 8
 alpha = 1/32
+seed = 42  # Random seed for reproducibility
 
 # %% Training configuration
 # Adapter types to train on (default: all)
@@ -249,18 +251,12 @@ adapter_types = ['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_pro
 
 # Determine activation directory based on adapter types
 if set(adapter_types) == set(['gate_proj', 'up_proj', 'down_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj']):
-    # Full 7-adapter mode - check both locations
-    if os.path.exists('./activations_all_adapters'):
-        activation_dir = './activations_all_adapters'
-    else:
-        activation_dir = '../../lora-activations-dashboard/backend/activations_all_adapters'
+    # Full 7-adapter mode
+    activation_dir = '../2_lora_activation_interp/activations_all_adapters'
 else:
     # Custom adapter selection
     adapter_str = '-'.join([a[:1] for a in sorted(adapter_types)])
-    if os.path.exists(f'./activations_{adapter_str}'):
-        activation_dir = f'./activations_{adapter_str}'
-    else:
-        activation_dir = f'../../lora-activations-dashboard/backend/activations_{adapter_str}'
+    activation_dir = f'../2_lora_activation_interp/activations_{adapter_str}'
 
 config = {
     'activation_dir': activation_dir,
@@ -273,6 +269,7 @@ config = {
     'warmup_steps': 100,
     'aux_loss_alpha': alpha,  # Auxiliary loss coefficient
     'dead_threshold': 1e6,
+    'seed': seed,  # Random seed for reproducibility
     'use_wandb': True,  # Enable wandb logging
     'wandb_project': 'lora-interp',
     'wandb_run_name': None,  # Will be set based on adapter types
@@ -288,6 +285,16 @@ if not os.path.exists(config['activation_dir']):
     print("Please run generate_activations_multigpu.py or generate_activations_data.py first with the appropriate adapter types.")
     print(f"Example: python generate_activations_multigpu.py --adapter-types {' '.join(adapter_types)}")
     raise FileNotFoundError(f"Activation directory not found: {config['activation_dir']}")
+
+# %% Set random seeds for reproducibility
+print(f"Setting random seed: {config['seed']}")
+torch.manual_seed(config['seed'])
+torch.cuda.manual_seed_all(config['seed'])
+np.random.seed(config['seed'])
+random.seed(config['seed'])
+# For deterministic behavior (may impact performance)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 # %% Initialize wandb
 if config['use_wandb']:

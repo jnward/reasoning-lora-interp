@@ -1,0 +1,8 @@
+*.html
+*.pt
+lora_checkpoints/
+*.log
+*/wandb
+*/CLAUDE.md
+*.json
+*.h5

@@ -131,7 +131,7 @@ class OptimizedTopKCollector:
     }
     
     def __init__(self,
-                 activation_dir: str = "../sae_interp/activations_all_adapters",
+                 activation_dir: str = "./activations_all_adapters",
                  top_k: int = 50,
                  context_window: int = 30,
                  min_activation_threshold: float = 0.01,
